@@ -1,0 +1,8 @@
+.env
+*.log
+logs/
+cron/
+browser-use/
+mcfarlane-exotics.json
+*token*
+*credential*
