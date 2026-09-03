@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from mcfarlane_wallet_aliases import last_sale_text
 
 STATE = Path(r"C:/Users/jltfo/AppData/Local/hermes/price-watches/mcfarlane-exotics.json")
 TABLE = Path(r"C:/Users/jltfo/nft_exotic_watch.md")
@@ -28,10 +29,7 @@ for collection in state["collections"]:
         for item in listings
     )
     sale = collection.get("last_exotic_sale")
-    if sale:
-        last_sale = f"{sale['price']:,} {display_currency(sale.get('currency', state.get('currency', 'POLYGON')))} — {sale['activity_time']}"
-    else:
-        last_sale = "Not yet verified"
+    last_sale = last_sale_text(sale, state.get("currency", "POLYGON"))
     source_url = collection["source_url"]
     lines.append(
         f"| {collection['name']} | {for_sale} | {count} | {prices} | "

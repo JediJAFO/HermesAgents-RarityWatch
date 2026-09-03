@@ -6,7 +6,9 @@ const { chromium } = require('C:/Users/jltfo/AppData/Local/hermes/hermes-agent/n
 const ROOT = 'C:/Users/jltfo/AppData/Local/hermes/price-watches';
 const STATE = path.join(ROOT, 'mcfarlane-exotics.json');
 const RUN = path.join(ROOT, 'mcfarlane-deterministic-run.json');
+const ALIASES = path.join(ROOT, 'mcfarlane-wallet-aliases.json');
 const CDP = 'http://[::1]:9222';
+const RARIBLE_API = 'https://api.rarible.org/v0.1/orders/sell/byItem';
 const GAP_MS = 10000; // User-required minimum pacing between marketplace navigations.
 const LOAD_SETTLE_MS = 4000;
 // Two measured attempts are sufficient for a transient UI shell. Longer retry
@@ -66,6 +68,13 @@ function normalizeListings(raw) {
   out.sort((a, b) => a.token_id.localeCompare(b.token_id, undefined, { numeric: true }) || a.url.localeCompare(b.url));
   return out;
 }
+function ownerFromProductText(text) {
+  // The token page's current owner is a seller cross-check for an active listing.
+  const full = text.match(/(?:owned\s+by|owner)\s*[:\-]?\s*(?:\n|\s)*(0x[a-f0-9]{40})\b/i);
+  if (full) return { wallet: full[1] };
+  const masked = text.match(/(?:owned\s+by|owner)[\s\S]{0,80}?(?:\.\.\.|…)([a-f0-9]{4,9})\b/i);
+  return masked ? { display: `...${masked[1].toLowerCase()}` } : null;
+}
 async function extractObservation(page, collection) {
   const actualUrl = page.url();
   const body = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
@@ -101,11 +110,41 @@ async function verifyExoticTraits(page, listings, deadlineAt) {
       const text = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
       if (explicitBlock(text)) return { ok: false, global: true, reason: 'explicit marketplace block evidence on product page' };
       if (!/\bRarity\s*(?:\n|\s)+Exotic\b/i.test(text)) return { ok: false, reason: `product trait did not verify Exotic for token ${listing.token_id}` };
+      const owner = ownerFromProductText(text);
+      if (owner?.wallet) Object.assign(listing, resolveSeller(owner.wallet), { seller_lookup: 'token-page current owner' });
+      else if (owner?.display) { listing.seller_display = owner.display; listing.seller_lookup = 'token-page masked current owner'; }
     } catch (error) {
       return { ok: false, reason: `product rarity verification error: ${String(error.message || error).slice(0, 180)}` };
     }
   }
+  await enrichListingSellers(listings, deadlineAt);
   return { ok: true };
+}
+
+async function enrichListingSellers(listings, deadlineAt) {
+  // Active sell orders are the authoritative seller source. A lookup failure
+  // never invalidates a browser-verified listing, because seller display is
+  // enrichment rather than listing/rarity evidence.
+  const key = process.env.RARIBLE_API_KEY;
+  if (!key) return;
+  for (const listing of listings) {
+    if (Date.now() + GAP_MS + 15000 > deadlineAt) return;
+    await sleep(GAP_MS);
+    try {
+      const itemId = listing.url.split('/token/')[1] || '';
+      if (!/^POLYGON:0x[0-9a-f]+:[0-9]+$/i.test(itemId)) { listing.seller_lookup = 'invalid item identity'; continue; }
+      const query = new URLSearchParams({ itemId, status: 'ACTIVE', size: '20' });
+      const response = await fetch(`${RARIBLE_API}?${query}`, { headers: { 'X-API-KEY': key, 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' } });
+      if (!response.ok) { listing.seller_lookup = `order API HTTP ${response.status}`; continue; }
+      const data = await response.json();
+      const orders = Array.isArray(data.orders) ? data.orders : [];
+      const matching = orders.find(order => order && order.status === 'ACTIVE' && typeof order.maker === 'string');
+      if (!matching) { listing.seller_lookup = 'no active seller order returned'; continue; }
+      Object.assign(listing, resolveSeller(matching.maker), { seller_lookup: 'Rarible active sell order maker' });
+    } catch (error) {
+      listing.seller_lookup = 'seller lookup unavailable';
+    }
+  }
 }
 
 async function observeWithRetries(page, collection, waitBeforeNav, deadlineAt) {
@@ -144,9 +183,34 @@ function stabilizeListingNames(prior, observed) {
     listings: (observed.listings || []).map(x => ({ ...x, name: known.get(String(x.token_id)) || x.name }))
   };
 }
+function comparableBaseline(baseline) {
+  return {
+    for_sale: Boolean(baseline.for_sale),
+    listing_count: baseline.listing_count,
+    listings: (baseline.listings || []).map(x => ({ token_id: x.token_id, name: x.name, price: x.price, currency: x.currency, url: x.url }))
+  };
+}
 function currency(v) { return v === 'POLYGON' ? 'POL' : v; }
-function saleText(c) { const s = c.last_exotic_sale; return s ? `${Number(s.price).toLocaleString()} ${currency(s.currency)}, ${s.activity_time}` : 'Not yet verified'; }
-function listingPrices(c) { return (c.baseline.listings || []).map(x => `${Number(x.price).toLocaleString()} ${currency(x.currency)}`).join(', ') || '—'; }
+function normalizedWallet(value) { return typeof value === 'string' && value.trim() ? value.split(':').pop().toLowerCase().trim() : null; }
+function resolveSeller(wallet) {
+  const normalized = normalizedWallet(wallet);
+  if (!normalized) return { seller_wallet: null, seller_name_tag: null };
+  let aliases;
+  try { aliases = JSON.parse(fs.readFileSync(ALIASES, 'utf8')); } catch { return { seller_wallet: normalized, seller_name_tag: null }; }
+  const exact = aliases.exact_aliases || {};
+  if (typeof exact[normalized] === 'string') return { seller_wallet: normalized, seller_name_tag: exact[normalized] };
+  const matches = (aliases.masked_aliases || []).filter(x => x && typeof x.prefix === 'string' && typeof x.suffix === 'string' && normalized.startsWith(x.prefix.toLowerCase()) && normalized.endsWith(x.suffix.toLowerCase())).map(x => x.name_tag).filter(x => typeof x === 'string');
+  return { seller_wallet: normalized, seller_name_tag: matches.length === 1 ? matches[0] : null };
+}
+function sellerText(listing) { return listing.seller_name_tag || (listing.seller_wallet ? `...${listing.seller_wallet.slice(-9)}` : 'Seller not recorded'); }
+function buyerText(s) {
+  const tagged = s.buyer_display || s.buyer_name_tag;
+  if (tagged) return tagged;
+  const wallet = normalizedWallet(s.buyer_wallet || s.buyer);
+  return wallet ? `...${wallet.slice(-9)}` : 'Buyer not recorded';
+}
+function saleText(c) { const s = c.last_exotic_sale; return s ? `${Number(s.price).toLocaleString()} ${currency(s.currency)}, ${s.activity_time} by ${buyerText(s)}` : 'Not yet verified'; }
+function listingDetails(c) { return (c.baseline.listings || []).map(x => `${Number(x.price).toLocaleString()} ${currency(x.currency)} by ${sellerText(x)}`).join(', ') || '—'; }
 function report(state, outcome) {
   const active = state.collections.filter(c => c.baseline && c.baseline.for_sale);
   const lines = [];
@@ -160,7 +224,7 @@ function report(state, outcome) {
   const rows = outcome.changed ? state.collections : active;
   for (const c of rows) {
     const b = c.baseline || { for_sale: false, listing_count: 0, listings: [] };
-    if (b.for_sale) lines.push(`• **${c.name}** — **🟢 YES**; ${b.listing_count} listing(s); **🟢 ${listingPrices(c)}**; last: ${saleText(c)}; [View](<${c.source_url}>)`);
+    if (b.for_sale) lines.push(`• **${c.name}** — **🟢 YES**; ${b.listing_count} listing(s); **🟢 ${listingDetails(c)}**; last: ${saleText(c)}; [View](<${c.source_url}>)`);
     else if (outcome.changed) lines.push(`• **${c.name}** — No; 0 listing(s); —; last: ${saleText(c)}`);
   }
   if (!rows.length) lines.push('No active Exotic buy-now listings.');
@@ -218,8 +282,8 @@ async function main() {
     if (result.kind !== 'VERIFIED') { failures.push({ name: collection.name, type: result.reason || 'local failure' }); continue; }
     const prior = collection.baseline || { for_sale: false, listing_count: 0, listings: [] };
     const stableBaseline = stabilizeListingNames(prior, result.baseline);
-    const candidateFingerprint = canonical(stableBaseline);
-    if (canonical(prior) !== candidateFingerprint) {
+    const candidateFingerprint = canonical(comparableBaseline(stableBaseline));
+    if (canonical(comparableBaseline(prior)) !== candidateFingerprint) {
       // Promote a change only after the same normalized observation appears in
       // two independent interval runs. This avoids an extra slow browser pass
       // and makes a transient card/render defect incapable of alerting.
@@ -235,6 +299,8 @@ async function main() {
       continue;
     }
     delete candidates[collection.name];
+    // Seller enrichment is display data, not an alert-worthy listing change.
+    collection.baseline = stableBaseline;
     collection.last_successful_observation = run.at;
   }
   state.pending_exotic_change_candidates = candidates;
