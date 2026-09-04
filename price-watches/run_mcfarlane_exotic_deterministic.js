@@ -209,7 +209,24 @@ function buyerText(s) {
   const wallet = normalizedWallet(s.buyer_wallet || s.buyer);
   return wallet ? `...${wallet.slice(-9)}` : 'Buyer not recorded';
 }
-function saleText(c) { const s = c.last_exotic_sale; return s ? `${Number(s.price).toLocaleString()} ${currency(s.currency)}, ${s.activity_time} by ${buyerText(s)}` : 'Not yet verified'; }
+function saleTimeText(s) {
+  const raw = s?.activity_date;
+  if (typeof raw !== 'string' || !raw.trim()) return s?.activity_time || 'time not recorded';
+  const instant = new Date(raw);
+  if (Number.isNaN(instant.getTime())) return s?.activity_time || 'time not recorded';
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZoneName: 'short'
+  }).formatToParts(instant).reduce((out, x) => ({ ...out, [x.type]: x.value }), {});
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute} ${parts.timeZoneName}`;
+}
+function saleText(c) {
+  const s = c.last_exotic_sale;
+  if (!s) return 'Not yet verified';
+  const usd = Number(s.usd_amount);
+  const usdText = Number.isFinite(usd) ? ` ($${usd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })})` : '';
+  return `${Number(s.price).toLocaleString()} ${currency(s.currency)}${usdText}, ${saleTimeText(s)} by ${buyerText(s)}`;
+}
 function listingDetails(c) { return (c.baseline.listings || []).map(x => `${Number(x.price).toLocaleString()} ${currency(x.currency)} by ${sellerText(x)}`).join(', ') || '—'; }
 function report(state, outcome) {
   const active = state.collections.filter(c => c.baseline && c.baseline.for_sale);
