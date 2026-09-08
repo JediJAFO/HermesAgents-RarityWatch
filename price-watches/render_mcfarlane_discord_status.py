@@ -28,7 +28,7 @@ for c in state["collections"]:
         # Discord supports bold but not arbitrary text color in normal messages;
         # the green indicator makes active rows stand out without an embed.
         active_status = "**🟢 YES**"
-        active_price = f"**🟢 {prices}**"
+        active_price = f"**{prices}**"
         lines.append(
             f"• **{c['name']}** — {active_status}; {count} listing(s); {active_price}; "
             f"last: {last_sale}; [View](<{c['source_url']}>)"

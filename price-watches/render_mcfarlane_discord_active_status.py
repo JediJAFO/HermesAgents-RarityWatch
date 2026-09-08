@@ -27,7 +27,7 @@ for c in active:
     sale = c.get("last_exotic_sale")
     last_sale = last_sale_text(sale, state.get("currency", "POLYGON"))
     lines.append(
-        f"• **{c['name']}** — **🟢 YES**; {count} listing(s); **🟢 {prices}**; "
+        f"• **{c['name']}** — **🟢 YES**; {count} listing(s); **{prices}**; "
         f"last: {last_sale}; [View](<{c['source_url']}>)"
     )
 

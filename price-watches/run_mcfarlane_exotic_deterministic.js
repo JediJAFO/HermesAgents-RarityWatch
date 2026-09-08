@@ -241,7 +241,7 @@ function report(state, outcome) {
   const rows = outcome.changed ? state.collections : active;
   for (const c of rows) {
     const b = c.baseline || { for_sale: false, listing_count: 0, listings: [] };
-    if (b.for_sale) lines.push(`• **${c.name}** — **🟢 YES**; ${b.listing_count} listing(s); **🟢 ${listingDetails(c)}**; last: ${saleText(c)}; [View](<${c.source_url}>)`);
+    if (b.for_sale) lines.push(`• **${c.name}** — **🟢 YES**; ${b.listing_count} listing(s); **${listingDetails(c)}**; last: ${saleText(c)}; [View](<${c.source_url}>)`);
     else if (outcome.changed) lines.push(`• **${c.name}** — No; 0 listing(s); —; last: ${saleText(c)}`);
   }
   if (!rows.length) lines.push('No active Exotic buy-now listings.');
