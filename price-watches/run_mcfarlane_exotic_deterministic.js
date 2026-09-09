@@ -51,6 +51,14 @@ function priceFrom(text) {
   const price = Number(m[1].replace(/,/g, ''));
   return Number.isFinite(price) ? { price, currency: 'POLYGON' } : null;
 }
+function buyNowPriceFromProduct(text) {
+  // Product pages can contain historical prices too; use only the price tied to
+  // the live BUY NOW control, never the first generic POL amount on the page.
+  const match = String(text || '').match(/BUY\s+NOW(?:\s+FOR)?\s*(?:\n|\s)+([\d,]+(?:\.\d+)?)\s*(POLYGON|MATIC|POL)\b/i);
+  if (!match) return null;
+  const price = Number(match[1].replace(/,/g, ''));
+  return Number.isFinite(price) ? { price, currency: 'POLYGON' } : null;
+}
 function normalizeListings(raw) {
   const out = [];
   const seen = new Set();
@@ -59,7 +67,8 @@ function normalizeListings(raw) {
     const idMatch = href.match(/:([0-9]+)\/?$/);
     const offer = priceFrom(row.text || '');
     const text = (row.text || '').replace(/\s+/g, ' ').trim();
-    if (!idMatch || !offer || !/BUY NOW/i.test(text) || /OPEN FOR BIDS/i.test(text)) continue;
+    const fixedPriceNoBids = Boolean(offer) && /Highest bid\s*(?:\n|\s)+No bids yet/i.test(row.text || '');
+    if (!idMatch || !offer || (!/BUY NOW/i.test(text) && !fixedPriceNoBids) || /OPEN FOR BIDS/i.test(text)) continue;
     if (seen.has(href)) continue;
     seen.add(href);
     const name = text.replace(/BUY NOW/ig, '').replace(/[\d,]+(?:\.\d+)?\s*(POLYGON|MATIC|POL)\b/ig, '').trim().slice(0, 300) || 'Internal listing name';
@@ -86,6 +95,12 @@ async function extractObservation(page, collection) {
   // proof is the exact URL plus BUY NOW card extraction and per-item trait
   // verification below; do not treat absent cosmetic controls as a change.
 
+  // Wait briefly for either a listing card or an explicit empty-state signal.
+  // A loading shell must never be promoted as a verified zero-listing result.
+  await page.waitForFunction(() => {
+    const text = document.body ? document.body.innerText : '';
+    return Boolean(document.querySelector('a[href*="/token/"]')) || /\b(no items found|no results found|nothing found|0 items)\b/i.test(text);
+  }, { timeout: 10000 }).catch(() => {});
   const tokenAnchors = await page.locator('a[href*="/token/"]').evaluateAll(nodes => nodes.map(a => {
     let p = a; let text = '';
     for (let i = 0; i < 6 && p; i++, p = p.parentElement) {
@@ -96,6 +111,16 @@ async function extractObservation(page, collection) {
     return { href: a.href, text };
   })).catch(() => []);
   const listings = normalizeListings(tokenAnchors);
+  const explicitEmpty = /\b(no items found|no results found|nothing found|0 items)\b/i.test(body);
+  // If token cards or BUY NOW text rendered but card parsing yielded nothing,
+  // preserve the last known-good baseline rather than treating it as a sale.
+  if (!listings.length && (tokenAnchors.length || /\bBUY NOW\b/i.test(body))) {
+    return { kind: 'UNAVAILABLE', reason: 'listing-card extraction inconsistent with rendered BUY NOW content', actual_url: actualUrl };
+  }
+  // A silent/unfinished filtered page is not evidence of zero available items.
+  if (!listings.length && !explicitEmpty) {
+    return { kind: 'UNAVAILABLE', reason: 'no explicit empty-listing evidence after render wait', actual_url: actualUrl };
+  }
   return { kind: 'VERIFIED', baseline: { for_sale: listings.length > 0, listing_count: listings.length, listings }, actual_url: actualUrl };
 }
 async function verifyExoticTraits(page, listings, deadlineAt) {
@@ -110,6 +135,10 @@ async function verifyExoticTraits(page, listings, deadlineAt) {
       const text = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
       if (explicitBlock(text)) return { ok: false, global: true, reason: 'explicit marketplace block evidence on product page' };
       if (!/\bRarity\s*(?:\n|\s)+Exotic\b/i.test(text)) return { ok: false, reason: `product trait did not verify Exotic for token ${listing.token_id}` };
+      const livePrice = buyNowPriceFromProduct(text);
+      if (!livePrice) return { ok: false, reason: `product page did not expose a live BUY NOW price for token ${listing.token_id}` };
+      listing.price = livePrice.price;
+      listing.currency = livePrice.currency;
       const owner = ownerFromProductText(text);
       if (owner?.wallet) Object.assign(listing, resolveSeller(owner.wallet), { seller_lookup: 'token-page current owner' });
       else if (owner?.display) { listing.seller_display = owner.display; listing.seller_lookup = 'token-page masked current owner'; }
@@ -173,14 +202,23 @@ async function observeWithRetries(page, collection, waitBeforeNav, deadlineAt) {
   return last || { kind: 'UNAVAILABLE', reason: 'no observation produced', attempts: MAX_ATTEMPTS };
 }
 function stabilizeListingNames(prior, observed) {
-  // Card wrappers add presentation-only words such as "Price" and can change
-  // their text shape between renders. Preserve the known private name when the
-  // token identity is unchanged; token/price/currency remain the comparison key.
-  const known = new Map((prior.listings || []).map(x => [String(x.token_id), x.name]));
+  // Card wrappers change presentation text. Preserve known display metadata only
+  // while the token and its active price remain unchanged.
+  const known = new Map((prior.listings || []).map(x => [String(x.token_id), x]));
   return {
     for_sale: Boolean(observed.for_sale),
     listing_count: observed.listing_count,
-    listings: (observed.listings || []).map(x => ({ ...x, name: known.get(String(x.token_id)) || x.name }))
+    listings: (observed.listings || []).map(x => {
+      const old = known.get(String(x.token_id));
+      const samePrice = old && Number(old.price) === Number(x.price) && old.currency === x.currency;
+      return {
+        ...x,
+        name: old?.name || x.name,
+        ...(samePrice && old?.price_set_time ? { price_set_time: old.price_set_time, price_set_source: old.price_set_source } : {}),
+        ...(!x.seller_wallet && !x.seller_name_tag && !x.seller_display && old?.seller_name_tag ? { seller_name_tag: old.seller_name_tag, seller_lookup: old.seller_lookup } : {}),
+        ...(!x.seller_wallet && !x.seller_name_tag && !x.seller_display && old?.seller_display ? { seller_display: old.seller_display, seller_lookup: old.seller_lookup } : {}),
+      };
+    })
   };
 }
 function comparableBaseline(baseline) {
@@ -227,7 +265,7 @@ function saleText(c) {
   const usdText = Number.isFinite(usd) ? ` ($${usd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })})` : '';
   return `${Number(s.price).toLocaleString()} ${currency(s.currency)}${usdText}, ${saleTimeText(s)} by ${buyerText(s)}`;
 }
-function listingDetails(c) { return (c.baseline.listings || []).map(x => `${Number(x.price).toLocaleString()} ${currency(x.currency)} by ${sellerText(x)}`).join(', ') || '—'; }
+function listingDetails(c) { return (c.baseline.listings || []).map(x => `${Number(x.price).toLocaleString()} ${currency(x.currency)} by ${sellerText(x)} (set ${x.price_set_time || 'time not recorded'})`).join(', ') || '—'; }
 function report(state, outcome) {
   const active = state.collections.filter(c => c.baseline && c.baseline.for_sale);
   const lines = [];
@@ -251,6 +289,7 @@ async function main() {
   const state = JSON.parse(fs.readFileSync(STATE, 'utf8'));
   const run = { at: now(), collector: 'deterministic-playwright-cdp-v1', results: [], global_stop: false };
   let browser, page, lastNavigation = false;
+  let selectedCollections = state.collections;
   try {
     browser = await chromium.connectOverCDP(CDP, { timeout: 20000 });
     const context = browser.contexts()[0];
@@ -262,8 +301,12 @@ async function main() {
     page.setDefaultTimeout(10000);
     const startedAt = Date.now();
     const deadlineAt = startedAt + BATCH_DEADLINE_MS;
+    const requestedNames = new Set((process.env.MCFARLANE_COLLECTION_NAMES || '').split('|').map(x => x.trim()).filter(Boolean));
     const limit = Math.min(state.collections.length, Number(process.env.MCFARLANE_LIMIT || state.collections.length));
-    const selectedCollections = state.collections.slice(0, limit);
+    selectedCollections = requestedNames.size
+      ? state.collections.filter(c => requestedNames.has(c.name))
+      : state.collections.slice(0, limit);
+    run.scope = selectedCollections.length === state.collections.length ? 'full' : 'targeted';
     for (const collection of selectedCollections) {
       if (Date.now() - startedAt > BATCH_DEADLINE_MS) {
         run.timed_out = true;
@@ -284,9 +327,9 @@ async function main() {
     if (browser) await browser.close().catch(() => {});
   }
   atomicJson(RUN, run);
-  if (run.global_stop || run.fatal_error || run.results.length !== state.collections.length) {
+  if (run.global_stop || run.fatal_error || run.results.length !== selectedCollections.length) {
     const reason = run.global_reason || run.fatal_error || 'incomplete deterministic result set';
-    state.last_monitor_outcome = { at: run.at, complete: false, changed: false, failed_collections: state.collections.map(c => ({ name: c.name, type: reason })) };
+    state.last_monitor_outcome = { at: run.at, complete: false, changed: false, scope: run.scope, failed_collections: selectedCollections.map(c => ({ name: c.name, type: reason })) };
     atomicJson(STATE, state);
     process.stdout.write(`Partial check — ${reason}. All saved data was retained.\r\n`);
     return;
@@ -296,6 +339,7 @@ async function main() {
   const candidates = state.pending_exotic_change_candidates || {};
   for (const collection of state.collections) {
     const result = run.results.find(x => x.name === collection.name);
+    if (!result) continue;
     if (result.kind !== 'VERIFIED') { failures.push({ name: collection.name, type: result.reason || 'local failure' }); continue; }
     const prior = collection.baseline || { for_sale: false, listing_count: 0, listings: [] };
     const stableBaseline = stabilizeListingNames(prior, result.baseline);
@@ -321,9 +365,9 @@ async function main() {
     collection.last_successful_observation = run.at;
   }
   state.pending_exotic_change_candidates = candidates;
-  const outcome = { at: run.at, complete: failures.length === 0, changed: changed.length > 0, failed_collections: failures, collector: run.collector };
+  const outcome = { at: run.at, complete: failures.length === 0, changed: changed.length > 0, scope: run.scope, failed_collections: failures, collector: run.collector };
   state.last_monitor_outcome = outcome;
-  if (outcome.complete) state.last_successful_monitor_run = run.at;
+  if (outcome.complete && run.scope === 'full') state.last_successful_monitor_run = run.at;
   if (changed.length) {
     const fingerprint = canonical(state.collections.map(c => [c.name, c.baseline]));
     if (state.last_whatsapp_delivered_change_fingerprint !== fingerprint) state.pending_whatsapp_change = { at: run.at, collections: changed, fingerprint };

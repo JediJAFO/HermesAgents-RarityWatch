@@ -21,7 +21,7 @@ for c in active:
     listings = baseline.get("listings") or []
     count = baseline.get("listing_count", len(listings))
     prices = ", ".join(
-        f"{x['price']:,} {display_currency(x.get('currency', state.get('currency', 'POLYGON')))} by {seller_label(x)}"
+        f"{x['price']:,} {display_currency(x.get('currency', state.get('currency', 'POLYGON')))} by {seller_label(x)} (set {x.get('price_set_time') or 'time not recorded'})"
         for x in listings
     ) or "—"
     sale = c.get("last_exotic_sale")
