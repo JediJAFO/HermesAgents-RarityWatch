@@ -51,7 +51,13 @@ function priceFrom(text) {
   const price = Number(m[1].replace(/,/g, ''));
   return Number.isFinite(price) ? { price, currency: 'POLYGON' } : null;
 }
+function productTextBeforeRecommendations(text) {
+  // Recommended cards belong to other tokens, including their traits/offers.
+  return String(text || '').split(/\b(?:more from (?:this |the )?collection|you (?:may|might) also like|recommendations|recommended (?:items|for you)|similar items)\b/i)[0];
+}
 function buyNowPriceFromProduct(text) {
+  text = productTextBeforeRecommendations(text);
+  if (/\bOPEN FOR BIDS\b/i.test(text)) return null;
   // Product pages can contain historical prices too; use only the price tied to
   // the live BUY NOW control, never the first generic POL amount on the page.
   const match = String(text || '').match(/BUY\s+NOW(?:\s+FOR)?\s*(?:\n|\s)+([\d,]+(?:\.\d+)?)\s*(POLYGON|MATIC|POL)\b/i);
@@ -124,6 +130,7 @@ async function extractObservation(page, collection) {
   return { kind: 'VERIFIED', baseline: { for_sale: listings.length > 0, listing_count: listings.length, listings }, actual_url: actualUrl };
 }
 async function verifyExoticTraits(page, listings, deadlineAt) {
+  const active = [];
   for (const listing of listings) {
     if (Date.now() + GAP_MS + 30000 > deadlineAt) return { ok: false, reason: 'batch time budget reached before product rarity verification' };
     // A product page is the definitive rarity check. This is also a marketplace
@@ -134,18 +141,23 @@ async function verifyExoticTraits(page, listings, deadlineAt) {
       await sleep(LOAD_SETTLE_MS);
       const text = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
       if (explicitBlock(text)) return { ok: false, global: true, reason: 'explicit marketplace block evidence on product page' };
-      if (!/\bRarity\s*(?:\n|\s)+Exotic\b/i.test(text)) return { ok: false, reason: `product trait did not verify Exotic for token ${listing.token_id}` };
-      const livePrice = buyNowPriceFromProduct(text);
+      if (!sameFilteredUrl(page.url(), listing.url)) return { ok: false, reason: `unexpected product URL for token ${listing.token_id}` };
+      const productText = productTextBeforeRecommendations(text);
+      if (/\bOPEN FOR BIDS\b/i.test(productText)) continue;
+      if (!/\bRarity\s*(?:\n|\s)+Exotic\b/i.test(productText)) return { ok: false, reason: `product trait did not verify Exotic for token ${listing.token_id}` };
+      const livePrice = buyNowPriceFromProduct(productText);
       if (!livePrice) return { ok: false, reason: `product page did not expose a live BUY NOW price for token ${listing.token_id}` };
       listing.price = livePrice.price;
       listing.currency = livePrice.currency;
-      const owner = ownerFromProductText(text);
+      const owner = ownerFromProductText(productText);
       if (owner?.wallet) Object.assign(listing, resolveSeller(owner.wallet), { seller_lookup: 'token-page current owner' });
       else if (owner?.display) { listing.seller_display = owner.display; listing.seller_lookup = 'token-page masked current owner'; }
+      active.push(listing);
     } catch (error) {
       return { ok: false, reason: `product rarity verification error: ${String(error.message || error).slice(0, 180)}` };
     }
   }
+  listings.splice(0, listings.length, ...active);
   await enrichListingSellers(listings, deadlineAt);
   return { ok: true };
 }
@@ -176,12 +188,14 @@ async function enrichListingSellers(listings, deadlineAt) {
   }
 }
 
-async function observeWithRetries(page, collection, waitBeforeNav, deadlineAt) {
+async function observeWithRetries(page, collection, waitBeforeNav, deadlineAt, recoverPage) {
   let last = null;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    if (Date.now() + (waitBeforeNav() ? GAP_MS : 0) + 30000 > deadlineAt) return { kind: 'UNAVAILABLE', reason: 'batch time budget reached before collection check', attempts: attempt - 1 };
-    if (waitBeforeNav()) await sleep(GAP_MS);
+    const needsGap = attempt > 1 || waitBeforeNav();
+    if (Date.now() + (needsGap ? GAP_MS : 0) + 30000 > deadlineAt) return { kind: 'UNAVAILABLE', reason: 'batch time budget reached before collection check', attempts: attempt - 1 };
+    if (needsGap) await sleep(GAP_MS);
     try {
+      if (page.isClosed?.() && recoverPage) page = await recoverPage(deadlineAt);
       await page.goto(collection.source_url, { waitUntil: 'domcontentloaded', timeout: 25000 });
       await sleep(LOAD_SETTLE_MS);
       const result = await extractObservation(page, collection);
@@ -190,7 +204,11 @@ async function observeWithRetries(page, collection, waitBeforeNav, deadlineAt) {
       if (result.kind === 'VERIFIED') {
         const traits = await verifyExoticTraits(page, result.baseline.listings, deadlineAt);
         if (traits.global) return { kind: 'GLOBAL_BLOCK', reason: traits.reason, attempts: attempt };
-        if (traits.ok) return result;
+        if (traits.ok) {
+          result.baseline.listing_count = result.baseline.listings.length;
+          result.baseline.for_sale = result.baseline.listings.length > 0;
+          return result;
+        }
         last = { kind: 'UNAVAILABLE', reason: traits.reason, attempts: attempt };
         continue;
       }
@@ -285,35 +303,87 @@ function report(state, outcome) {
   if (!rows.length) lines.push('No active Exotic buy-now listings.');
   return lines.join('\r\n') + '\r\n';
 }
+
+// A primary scheduled full run always reports its first result. Targeted
+// recovery passes are silent while incomplete and emit once when they clear
+// the outstanding checks from that primary run.
+function recordPartialDeliveryPolicy(state, outcome) {
+  const prior = state.partial_discord_notice;
+  if (outcome.scope === 'full') {
+    if (!outcome.complete) {
+      state.partial_discord_notice = {
+        started_at: outcome.at,
+        scope: outcome.scope,
+        failures: (outcome.failed_collections || []).map(x => x.name),
+      };
+    } else if (prior) {
+      delete state.partial_discord_notice;
+    }
+    return true;
+  }
+  // Targeted recovery/confirmation: repeated incomplete attempts are internal.
+  if (!outcome.complete) return false;
+  if (prior) delete state.partial_discord_notice;
+  return true;
+}
+function acquireExecutionLock(lockPath = path.join(ROOT, '.exotic-execution-lock')) {
+  const token = process.env.MCFARLANE_EXOTIC_LOCK_TOKEN;
+  try {
+    const owner = JSON.parse(fs.readFileSync(path.join(lockPath, 'owner.json'), 'utf8'));
+    if (token && token === owner.token) return () => {};
+  } catch {}
+  try { fs.mkdirSync(lockPath); }
+  catch (error) { if (error.code === 'EEXIST') return null; throw error; }
+  try {
+    fs.writeFileSync(path.join(lockPath, 'owner.json'), JSON.stringify({pid: process.pid, token: require('crypto').randomBytes(24).toString('hex')}));
+  } catch (error) { fs.rmdirSync(lockPath); throw error; }
+  // Do not time-expire another process's lease. Hard kills deliberately fail closed.
+  return () => { fs.unlinkSync(path.join(lockPath, 'owner.json')); fs.rmdirSync(lockPath); };
+}
 async function main() {
+  const release = acquireExecutionLock();
+  if (!release) { process.exitCode = 75; return; }
+  try { await collectMain(); } finally { release(); }
+}
+async function collectMain() {
   const state = JSON.parse(fs.readFileSync(STATE, 'utf8'));
   const run = { at: now(), collector: 'deterministic-playwright-cdp-v1', results: [], global_stop: false };
   let browser, page, lastNavigation = false;
-  let selectedCollections = state.collections;
+  const requestedNames = new Set((process.env.MCFARLANE_COLLECTION_NAMES || '').split('|').map(x => x.trim()).filter(Boolean));
+  const limit = Math.min(state.collections.length, Number(process.env.MCFARLANE_LIMIT || state.collections.length));
+  const selectedCollections = requestedNames.size
+    ? state.collections.filter(c => requestedNames.has(c.name))
+    : state.collections.slice(0, limit);
+  run.scope = !requestedNames.size && !process.env.MCFARLANE_RUN_KIND && selectedCollections.length === state.collections.length ? 'full' : 'targeted';
+  if (run.scope === 'full') state.last_primary_exotic_run_id = require('crypto').randomUUID();
+  const selectedNames = new Set(selectedCollections.map(c => c.name));
+  const outstanding = run.scope === 'targeted'
+    ? (state.last_monitor_outcome?.failed_collections || []).filter(x => !selectedNames.has(x.name)) : [];
   try {
     browser = await chromium.connectOverCDP(CDP, { timeout: 20000 });
     const context = browser.contexts()[0];
-    // This profile belongs only to the monitor. Remove abandoned pages from a
-    // killed/timeout prior run before doing any collection request.
-    const stalePages = context.pages();
-    await Promise.all(stalePages.map(p => p.close({ runBeforeUnload: false }).catch(() => {})));
+    // Own only the newly created page. Other tabs may belong to another task.
     page = await context.newPage();
     page.setDefaultTimeout(10000);
     const startedAt = Date.now();
     const deadlineAt = startedAt + BATCH_DEADLINE_MS;
-    const requestedNames = new Set((process.env.MCFARLANE_COLLECTION_NAMES || '').split('|').map(x => x.trim()).filter(Boolean));
-    const limit = Math.min(state.collections.length, Number(process.env.MCFARLANE_LIMIT || state.collections.length));
-    selectedCollections = requestedNames.size
-      ? state.collections.filter(c => requestedNames.has(c.name))
-      : state.collections.slice(0, limit);
-    run.scope = selectedCollections.length === state.collections.length ? 'full' : 'targeted';
+    let reconnects = 0;
+    const recoverPage = async deadline => {
+      if (reconnects >= 1 || Date.now() + 50000 > deadline) throw new Error('owned-page reconnect budget exhausted');
+      reconnects++;
+      if (!browser.isConnected()) browser = await chromium.connectOverCDP(CDP, { timeout: 20000 });
+      page = await browser.contexts()[0].newPage();
+      page.setDefaultTimeout(10000);
+      return page;
+    };
+
     for (const collection of selectedCollections) {
       if (Date.now() - startedAt > BATCH_DEADLINE_MS) {
         run.timed_out = true;
         run.results.push({ name: collection.name, kind: 'UNAVAILABLE', reason: 'batch time budget reached before collection check' });
         continue;
       }
-      const result = await observeWithRetries(page, collection, () => lastNavigation, deadlineAt);
+      const result = await observeWithRetries(page, collection, () => lastNavigation, deadlineAt, recoverPage);
       lastNavigation = true;
       run.results.push({ name: collection.name, ...result });
       // Persist progress so an interrupted diagnostic has useful evidence.
@@ -329,13 +399,18 @@ async function main() {
   atomicJson(RUN, run);
   if (run.global_stop || run.fatal_error || run.results.length !== selectedCollections.length) {
     const reason = run.global_reason || run.fatal_error || 'incomplete deterministic result set';
-    state.last_monitor_outcome = { at: run.at, complete: false, changed: false, scope: run.scope, failed_collections: selectedCollections.map(c => ({ name: c.name, type: reason })) };
+    const outcome = { at: run.at, complete: false, changed: false, scope: run.scope, failed_collections: [...outstanding, ...selectedCollections.map(c => ({ name: c.name, type: reason }))] };
+    state.last_monitor_outcome = outcome;
+    const deliver = recordPartialDeliveryPolicy(state, outcome);
     atomicJson(STATE, state);
-    process.stdout.write(`Partial check — ${reason}. All saved data was retained.\r\n`);
+    // Always save the diagnostic; only the initial partial incident goes to Discord.
+    const text = report(state, outcome);
+    atomicText(path.join(ROOT, 'mcfarlane-discord-deterministic-status.md'), text);
+    if (deliver) process.stdout.write(text);
     return;
   }
 
-  const failures = [], changed = [];
+  const failures = [...outstanding], changed = [];
   const candidates = state.pending_exotic_change_candidates || {};
   for (const collection of state.collections) {
     const result = run.results.find(x => x.name === collection.name);
@@ -367,6 +442,7 @@ async function main() {
   state.pending_exotic_change_candidates = candidates;
   const outcome = { at: run.at, complete: failures.length === 0, changed: changed.length > 0, scope: run.scope, failed_collections: failures, collector: run.collector };
   state.last_monitor_outcome = outcome;
+  const deliver = recordPartialDeliveryPolicy(state, outcome);
   if (outcome.complete && run.scope === 'full') state.last_successful_monitor_run = run.at;
   if (changed.length) {
     const fingerprint = canonical(state.collections.map(c => [c.name, c.baseline]));
@@ -376,6 +452,6 @@ async function main() {
   atomicJson(STATE, state);
   const text = report(state, outcome);
   atomicText(path.join(ROOT, 'mcfarlane-discord-deterministic-status.md'), text);
-  process.stdout.write(text);
+  if (deliver) process.stdout.write(text);
 }
 main().catch(error => { console.error(`Deterministic monitor fatal error: ${error.stack || error}`); process.exitCode = 1; });
