@@ -14,7 +14,11 @@ const LOAD_SETTLE_MS = 4000;
 // Two measured attempts are sufficient for a transient UI shell. Longer retry
 // loops made a 10-collection run exceed its useful execution window.
 const MAX_ATTEMPTS = 2;
-const BATCH_DEADLINE_MS = 330000; // retain state rather than running indefinitely.
+function executionBudget(selectedCount) {
+  // Breathing room for serial collection/product checks; never unlimited.
+  const seconds = Math.min(1500, Math.max(600, selectedCount * 60 + 120));
+  return { batch_ms: seconds * 1000, wrapper_timeout_seconds: seconds + 120 };
+}
 const ET = new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -118,13 +122,24 @@ async function extractObservation(page, collection) {
   })).catch(() => []);
   const listings = normalizeListings(tokenAnchors);
   const explicitEmpty = /\b(no items found|no results found|nothing found|0 items)\b/i.test(body);
-  // If token cards or BUY NOW text rendered but card parsing yielded nothing,
-  // preserve the last known-good baseline rather than treating it as a sale.
-  if (!listings.length && (tokenAnchors.length || /\bBUY NOW\b/i.test(body))) {
+  // A token card that contains BUY NOW but cannot be parsed is ambiguous, so
+  // retain the last known-good baseline.  Bid-only cards are different: they
+  // are affirmative evidence of no active fixed-price listing and may produce
+  // a verified empty result even if unrelated page chrome mentions BUY NOW.
+  // Never use body-level text here because the storefront renders that text
+  // outside individual listing cards.
+  const unparsedBuyNowCard = tokenAnchors.some(({ text }) => /\bBUY NOW\b/i.test(text || ''));
+  // If every rendered token card is explicitly bid-only, the filtered set has
+  // no active fixed-price listing.  That is stronger than a generic empty
+  // message and avoids treating a bid-only inventory card as a parser fault.
+  const onlyBidOnlyCards = tokenAnchors.length > 0 && tokenAnchors.every(({ text }) =>
+    !/\bBUY NOW\b/i.test(text || '') && /\b(?:Highest bid|No bids yet|OPEN FOR BIDS)\b/i.test(text || '')
+  );
+  if (!listings.length && unparsedBuyNowCard) {
     return { kind: 'UNAVAILABLE', reason: 'listing-card extraction inconsistent with rendered BUY NOW content', actual_url: actualUrl };
   }
   // A silent/unfinished filtered page is not evidence of zero available items.
-  if (!listings.length && !explicitEmpty) {
+  if (!listings.length && !explicitEmpty && !onlyBidOnlyCards) {
     return { kind: 'UNAVAILABLE', reason: 'no explicit empty-listing evidence after render wait', actual_url: actualUrl };
   }
   return { kind: 'VERIFIED', baseline: { for_sale: listings.length > 0, listing_count: listings.length, listings }, actual_url: actualUrl };
@@ -271,10 +286,10 @@ function saleTimeText(s) {
   const instant = new Date(raw);
   if (Number.isNaN(instant.getTime())) return s?.activity_time || 'time not recorded';
   const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+    timeZone: 'America/New_York', year: 'numeric', month: 'short', day: 'numeric',
     hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZoneName: 'short'
   }).formatToParts(instant).reduce((out, x) => ({ ...out, [x.type]: x.value }), {});
-  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute} ${parts.timeZoneName}`;
+  return `${parts.month} ${parts.day}, ${parts.year}, ${parts.hour}:${parts.minute} ${parts.timeZoneName}`;
 }
 function saleText(c) {
   const s = c.last_exotic_sale;
@@ -283,7 +298,14 @@ function saleText(c) {
   const usdText = Number.isFinite(usd) ? ` ($${usd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })})` : '';
   return `${Number(s.price).toLocaleString()} ${currency(s.currency)}${usdText}, ${saleTimeText(s)} by ${buyerText(s)}`;
 }
-function listingDetails(c) { return (c.baseline.listings || []).map(x => `${Number(x.price).toLocaleString()} ${currency(x.currency)} by ${sellerText(x)} (set ${x.price_set_time || 'time not recorded'})`).join(', ') || '—'; }
+function listingPriceText(x, state) {
+  const pol = Number(x.price);
+  const rate = Number(state.current_pol_usd?.rate);
+  const usdText = x.currency === 'POLYGON' && Number.isFinite(pol) && Number.isFinite(rate)
+    ? ` ($${(pol * rate).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })})` : '';
+  return `${Number.isFinite(pol) ? pol.toLocaleString() : x.price} ${currency(x.currency)}${usdText}`;
+}
+function listingDetails(c, state) { return (c.baseline.listings || []).map(x => `${listingPriceText(x, state)} by ${sellerText(x)} (set ${x.price_set_time || 'time not recorded'})`).join(', ') || '—'; }
 function report(state, outcome) {
   const active = state.collections.filter(c => c.baseline && c.baseline.for_sale);
   const lines = [];
@@ -296,8 +318,12 @@ function report(state, outcome) {
   lines.push('');
   const rows = outcome.changed ? state.collections : active;
   for (const c of rows) {
-    const b = c.baseline || { for_sale: false, listing_count: 0, listings: [] };
-    if (b.for_sale) lines.push(`• **${c.name}** — **🟢 YES**; ${b.listing_count} listing(s); **${listingDetails(c)}**; last: ${saleText(c)}; [View](<${c.source_url}>)`);
+    if (!c.baseline) {
+      lines.push(`• **${c.name}** — Unknown; listings not yet verified; last: ${saleText(c)}`);
+      continue;
+    }
+    const b = c.baseline;
+    if (b.for_sale) lines.push(`• **${c.name}** — **🟢 YES**; ${b.listing_count} listing(s); **${listingDetails(c, state)}**; last: ${saleText(c)}; [View](<${c.source_url}>)`);
     else if (outcome.changed) lines.push(`• **${c.name}** — No; 0 listing(s); —; last: ${saleText(c)}`);
   }
   if (!rows.length) lines.push('No active Exotic buy-now listings.');
@@ -340,7 +366,26 @@ function acquireExecutionLock(lockPath = path.join(ROOT, '.exotic-execution-lock
   // Do not time-expire another process's lease. Hard kills deliberately fail closed.
   return () => { fs.unlinkSync(path.join(lockPath, 'owner.json')); fs.rmdirSync(lockPath); };
 }
+function selectCollections(state) {
+  const requestedNames = new Set((process.env.MCFARLANE_COLLECTION_NAMES || '').split('|').map(x => x.trim()).filter(Boolean));
+  const limit = Math.min(state.collections.length, Number(process.env.MCFARLANE_LIMIT || state.collections.length));
+  const selected = requestedNames.size
+    ? state.collections.filter(c => requestedNames.has(c.name))
+    : state.collections.slice(0, limit);
+  if (process.env.MCFARLANE_RUN_KIND === 'retry') {
+    const skipped = new Set((state.last_monitor_outcome?.failed_collections || [])
+      .filter(x => String(x.type || '').includes('batch time budget reached before collection check')).map(x => x.name));
+    selected.sort((a, b) => Number(skipped.has(b.name)) - Number(skipped.has(a.name)));
+  }
+  return selected;
+}
 async function main() {
+  // Read-only preflight lets the wrapper use this exact selection/budget policy.
+  if (process.argv?.includes('--print-execution-budget')) {
+    const state = JSON.parse(fs.readFileSync(STATE, 'utf8'));
+    process.stdout.write(JSON.stringify(executionBudget(selectCollections(state).length)) + '\n');
+    return;
+  }
   const release = acquireExecutionLock();
   if (!release) { process.exitCode = 75; return; }
   try { await collectMain(); } finally { release(); }
@@ -350,10 +395,9 @@ async function collectMain() {
   const run = { at: now(), collector: 'deterministic-playwright-cdp-v1', results: [], global_stop: false };
   let browser, page, lastNavigation = false;
   const requestedNames = new Set((process.env.MCFARLANE_COLLECTION_NAMES || '').split('|').map(x => x.trim()).filter(Boolean));
-  const limit = Math.min(state.collections.length, Number(process.env.MCFARLANE_LIMIT || state.collections.length));
-  const selectedCollections = requestedNames.size
-    ? state.collections.filter(c => requestedNames.has(c.name))
-    : state.collections.slice(0, limit);
+  const selectedCollections = selectCollections(state);
+  const BATCH_DEADLINE_MS = executionBudget(selectedCollections.length).batch_ms;
+  run.batch_budget_ms = BATCH_DEADLINE_MS;
   run.scope = !requestedNames.size && !process.env.MCFARLANE_RUN_KIND && selectedCollections.length === state.collections.length ? 'full' : 'targeted';
   if (run.scope === 'full') state.last_primary_exotic_run_id = require('crypto').randomUUID();
   const selectedNames = new Set(selectedCollections.map(c => c.name));
@@ -418,6 +462,15 @@ async function collectMain() {
     if (result.kind !== 'VERIFIED') { failures.push({ name: collection.name, type: result.reason || 'local failure' }); continue; }
     const prior = collection.baseline || { for_sale: false, listing_count: 0, listings: [] };
     const stableBaseline = stabilizeListingNames(prior, result.baseline);
+    // First observation is onboarding, not a change from invented zero inventory.
+    if (!collection.baseline) {
+      collection.baseline = stableBaseline;
+      collection.baseline_status = 'verified';
+      collection.last_successful_observation = run.at;
+      delete collection.onboarding_failure;
+      delete candidates[collection.name];
+      continue;
+    }
     const candidateFingerprint = canonical(comparableBaseline(stableBaseline));
     if (canonical(comparableBaseline(prior)) !== candidateFingerprint) {
       // Promote a change only after the same normalized observation appears in

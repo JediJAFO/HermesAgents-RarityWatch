@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from mcfarlane_wallet_aliases import last_sale_text
+from mcfarlane_wallet_aliases import last_sale_text, listing_price_text
 
 STATE = Path(r"C:/Users/jltfo/AppData/Local/hermes/price-watches/mcfarlane-exotics.json")
 OUTPUT = Path(r"C:/Users/jltfo/AppData/Local/hermes/price-watches/mcfarlane-whatsapp-status.md")
@@ -20,7 +20,7 @@ for c in state["collections"]:
     for_sale = bool(baseline.get("for_sale"))
     count = baseline.get("listing_count", len(listings))
     prices = "—" if not listings else ", ".join(
-        f"{x['price']:,} {display_currency(x.get('currency', state.get('currency', 'POLYGON')))}" for x in listings
+        listing_price_text(x, state) for x in listings
     )
     sale = c.get("last_exotic_sale")
     last_sale = last_sale_text(sale, state.get("currency", "POLYGON"))
