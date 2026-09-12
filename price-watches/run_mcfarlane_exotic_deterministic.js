@@ -4,6 +4,7 @@ const path = require('path');
 const { chromium } = require('C:/Users/jltfo/AppData/Local/hermes/hermes-agent/node_modules/playwright');
 
 const ROOT = 'C:/Users/jltfo/AppData/Local/hermes/price-watches';
+const whatsappPolicy = require(path.join(ROOT, 'exotic_whatsapp_policy.js'));
 const STATE = path.join(ROOT, 'mcfarlane-exotics.json');
 const RUN = path.join(ROOT, 'mcfarlane-deterministic-run.json');
 const ALIASES = path.join(ROOT, 'mcfarlane-wallet-aliases.json');
@@ -307,26 +308,23 @@ function listingPriceText(x, state) {
 }
 function listingDetails(c, state) { return (c.baseline.listings || []).map(x => `${listingPriceText(x, state)} by ${sellerText(x)} (set ${x.price_set_time || 'time not recorded'})`).join(', ') || '—'; }
 function report(state, outcome) {
-  const active = state.collections.filter(c => c.baseline && c.baseline.for_sale);
+  const changedNames = new Set((outcome.discord_changes || []).map(x => x.name));
   const lines = [];
   if (outcome.failed_collections.length) {
     lines.push(`Partial check — ${outcome.failed_collections.map(x => `**${x.name}** (${x.type})`).join('; ')}. Last-known-good rows were retained.`);
     lines.push('');
   }
-  lines.push(outcome.changed ? 'Changes detected —' : '**McFarlane Exotic Watch — no changes**');
+  lines.push(changedNames.size ? 'Changes detected —' : (outcome.complete === false ? '**McFarlane Exotic Watch — no confirmed changes**' : '**McFarlane Exotic Watch — no changes**'));
   lines.push(`Last complete check: ${state.last_successful_monitor_run || '—'}`);
   lines.push('');
-  const rows = outcome.changed ? state.collections : active;
+  const rows = state.collections.filter(c => c.baseline && changedNames.has(c.name));
   for (const c of rows) {
-    if (!c.baseline) {
-      lines.push(`• **${c.name}** — Unknown; listings not yet verified; last: ${saleText(c)}`);
-      continue;
-    }
     const b = c.baseline;
-    if (b.for_sale) lines.push(`• **${c.name}** — **🟢 YES**; ${b.listing_count} listing(s); **${listingDetails(c, state)}**; last: ${saleText(c)}; [View](<${c.source_url}>)`);
-    else if (outcome.changed) lines.push(`• **${c.name}** — No; 0 listing(s); —; last: ${saleText(c)}`);
+    const removed = (outcome.discord_changes || []).filter(x => x.name === c.name).flatMap(x => x.removed_listings || []);
+    const removalText = removed.length ? ` Removed ${removed.length} Exotic listing(s) (previously ${removed.map(x => `${listingPriceText(x, state)} by ${sellerText(x)}`).join(', ')}).` : '';
+    if (b.for_sale) lines.push(`• **${c.name}** — **🟢 YES**; ${b.listing_count} listing(s); **${listingDetails(c, state)}**; last: ${saleText(c)}; [View](<${c.source_url}>)${removalText}`);
+    else lines.push(`• **${c.name}** — No; 0 listing(s); —; last: ${saleText(c)}${removalText}`);
   }
-  if (!rows.length) lines.push('No active Exotic buy-now listings.');
   return lines.join('\r\n') + '\r\n';
 }
 
@@ -334,6 +332,14 @@ function report(state, outcome) {
 // recovery passes are silent while incomplete and emit once when they clear
 // the outstanding checks from that primary run.
 function recordPartialDeliveryPolicy(state, outcome) {
+  // Persist only undelivered, confirmed events. Legacy states have no queue;
+  // never reconstruct removals from a held candidate or a boolean change flag.
+  const queued = Array.isArray(state.pending_discord_listing_changes) ? state.pending_discord_listing_changes : [];
+  outcome.discord_changes = [...queued, ...(outcome.discord_changes || [])]
+    .filter(event => state.collections.some(c => c.name === event.name && c.baseline));
+  const deliver = outcome.scope === 'full' || outcome.complete;
+  if (deliver) delete state.pending_discord_listing_changes;
+  else if (outcome.discord_changes.length) state.pending_discord_listing_changes = outcome.discord_changes;
   const prior = state.partial_discord_notice;
   if (outcome.scope === 'full') {
     if (!outcome.complete) {
@@ -454,7 +460,7 @@ async function collectMain() {
     return;
   }
 
-  const failures = [...outstanding], changed = [];
+  const failures = [...outstanding], changed = [], discordChanges = [], whatsappChanges = [];
   const candidates = state.pending_exotic_change_candidates || {};
   for (const collection of state.collections) {
     const result = run.results.find(x => x.name === collection.name);
@@ -478,6 +484,10 @@ async function collectMain() {
       // and makes a transient card/render defect incapable of alerting.
       if (candidates[collection.name] === candidateFingerprint) {
         changed.push(collection.name);
+        whatsappChanges.push(...whatsappPolicy.confirmedEvents(collection.name, prior, stableBaseline, run.at));
+        const currentTokens = new Set(stableBaseline.listings.map(x => String(x.token_id)));
+        discordChanges.push({ name: collection.name, at: run.at,
+          removed_listings: (prior.listings || []).filter(x => !currentTokens.has(String(x.token_id))) });
         collection.baseline = stableBaseline;
         collection.last_successful_observation = run.at;
         delete candidates[collection.name];
@@ -493,15 +503,15 @@ async function collectMain() {
     collection.last_successful_observation = run.at;
   }
   state.pending_exotic_change_candidates = candidates;
-  const outcome = { at: run.at, complete: failures.length === 0, changed: changed.length > 0, scope: run.scope, failed_collections: failures, collector: run.collector };
+  const outcome = { at: run.at, complete: failures.length === 0, changed: changed.length > 0, scope: run.scope, failed_collections: failures, collector: run.collector, discord_changes: discordChanges };
   state.last_monitor_outcome = outcome;
   const deliver = recordPartialDeliveryPolicy(state, outcome);
   if (outcome.complete && run.scope === 'full') state.last_successful_monitor_run = run.at;
   if (changed.length) {
     const fingerprint = canonical(state.collections.map(c => [c.name, c.baseline]));
-    if (state.last_whatsapp_delivered_change_fingerprint !== fingerprint) state.pending_whatsapp_change = { at: run.at, collections: changed, fingerprint };
     state.last_alert_fingerprint = fingerprint;
   }
+  whatsappPolicy.enqueue(state, whatsappChanges, run.at);
   atomicJson(STATE, state);
   const text = report(state, outcome);
   atomicText(path.join(ROOT, 'mcfarlane-discord-deterministic-status.md'), text);
