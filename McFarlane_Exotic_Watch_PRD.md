@@ -1,8 +1,8 @@
 # Product Requirements Document — McFarlane Exotic Watch
 
 **Version:** 2.0  
-**Last updated:** 2026-09-12 EDT  
-**Implementation signature:** `4e63b85d6f21`  
+**Last updated:** 2026-09-13 EDT  
+**Implementation signature:** `46259d735bad`  
 **Status:** Active, deterministic implementation  
 **Private state:** `C:/Users/jltfo/AppData/Local/hermes/price-watches/mcfarlane-exotics.json`
 
