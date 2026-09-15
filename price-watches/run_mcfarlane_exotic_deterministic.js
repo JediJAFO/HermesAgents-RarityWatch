@@ -307,7 +307,65 @@ function listingPriceText(x, state) {
   return `${Number.isFinite(pol) ? pol.toLocaleString() : x.price} ${currency(x.currency)}${usdText}`;
 }
 function listingDetails(c, state) { return (c.baseline.listings || []).map(x => `${listingPriceText(x, state)} by ${sellerText(x)} (set ${x.price_set_time || 'time not recorded'})`).join(', ') || '—'; }
+function dailyHeartbeatDate(state, outcome) {
+  if (outcome.scope !== 'full') return null;
+  let occurrence;
+  try { occurrence = JSON.parse(process.env.MCFARLANE_PRIMARY_OCCURRENCE || 'null'); } catch { return null; }
+  if (!occurrence?.execution_id || !occurrence.scheduled_at || !/(Z|[+-]\d{2}:\d{2})$/.test(occurrence.scheduled_at)) return null;
+  const instant = new Date(occurrence.scheduled_at);
+  if (!Number.isFinite(instant.getTime())) return null;
+  const p = Object.fromEntries(ET.formatToParts(instant).map(x => [x.type,x.value]));
+  if (p.hour !== '08' || p.minute !== '00' || p.second !== '00') return null;
+  const date = `${p.year}-${p.month}-${p.day}`;
+  return state.discord_daily_heartbeat?.date >= date ? null : date;
+}
+function heartbeatAliases(collections) {
+  const preferred = {
+    'Batman Year 2: Designed by Todd McFarlane':'Batman Year 2',
+    "McFarlane's Dragons - Eternal Gift":'Dragons Eternal Gift',
+    "McFarlane Toys: McFarlane's Dragons - Komodo Series":'Dragons Komodo Series',
+    "McFarlane's Dragons - Komodo Gift":'Dragons Komodo Gift',
+    'Spawn - Wings of Redemption':'Spawn Wings of Redemption',
+    'McFarlane Toys: Spawn Gift':'Spawn Gift',
+    'McFarlane Toys: Redeemer Gift':'Redeemer Gift',
+  };
+  const aliases = new Map(), used = new Set();
+  // Sort the complete watch, not only active collections, so availability/order
+  // cannot rename another row. Suffixes disambiguate even an alias vs real name.
+  for (const name of [...new Set(collections.map(c => c.name))].sort()) {
+    const clean = (preferred[name] || name).replace(/[\r\n\t]+/g,' ').replace(/\s+/g,' ').replace(/[*_`<>|]/g,'').trim();
+    const base = clean.length <= 28 ? clean : `${clean.slice(0,20).trim()}~${require('crypto').createHash('sha256').update(name).digest('hex').slice(0,6)}`;
+    let alias = base, n = 1;
+    while (used.has(alias.toLowerCase())) { const suffix = `~${++n}`; alias = base.slice(0,28-suffix.length) + suffix; }
+    aliases.set(name, alias);
+    used.add(alias.toLowerCase());
+  }
+  return aliases;
+}
+function heartbeatReport(state, outcome = {}) {
+  const aliases = heartbeatAliases(state.collections);
+  const rate = Number(state.current_pol_usd?.rate);
+  const validRate = Number.isFinite(rate) && rate > 0;
+  const lines = [outcome.saved_preview ? '**8AM ET Exotic listings — saved preview**' : '**8AM ET Exotic listings**'];
+  if (outcome.complete === false) {
+    lines.push('Partial check — saved last-known-good listings; not all listings reverified.');
+    const unresolved = (outcome.failed_collections || []).map(x => aliases.get(x.name) || x.name.replace(/\s+/g,' '));
+    if (unresolved.length) lines.push(`Unresolved: ${unresolved.join('; ')}`);
+  }
+  for (const c of state.collections) {
+    if (!c.baseline?.for_sale) continue;
+    for (const listing of c.baseline.listings || []) {
+      const pricedState = validRate ? state : {...state, current_pol_usd:undefined};
+      const price = listingPriceText(listing, pricedState);
+      const usdMissing = !validRate || listing.currency !== 'POLYGON';
+      lines.push(`• ${aliases.get(c.name)} — ${price}${usdMissing ? ' (USD unavailable)' : ''}`);
+    }
+  }
+  if (!lines.some(x => x.startsWith('•'))) lines.push('No active listings in saved verified state.');
+  return lines.join('\r\n') + '\r\n';
+}
 function report(state, outcome) {
+  if (outcome.daily_heartbeat_date) return heartbeatReport(state, outcome);
   const changedNames = new Set((outcome.discord_changes || []).map(x => x.name));
   const lines = [];
   if (outcome.failed_collections.length) {
@@ -332,6 +390,11 @@ function report(state, outcome) {
 // recovery passes are silent while incomplete and emit once when they clear
 // the outstanding checks from that primary run.
 function recordPartialDeliveryPolicy(state, outcome) {
+  const heartbeatDate = dailyHeartbeatDate(state, outcome);
+  if (heartbeatDate) {
+    outcome.daily_heartbeat_date = heartbeatDate;
+    state.discord_daily_heartbeat = {date:heartbeatDate, generation:state.last_primary_exotic_run_id, generated_at:outcome.at};
+  }
   // Persist only undelivered, confirmed events. Legacy states have no queue;
   // never reconstruct removals from a held candidate or a boolean change flag.
   const queued = Array.isArray(state.pending_discord_listing_changes) ? state.pending_discord_listing_changes : [];
@@ -386,6 +449,11 @@ function selectCollections(state) {
   return selected;
 }
 async function main() {
+  if (process.argv?.includes('--print-saved-heartbeat')) {
+    const state = JSON.parse(fs.readFileSync(STATE, 'utf8'));
+    process.stdout.write(heartbeatReport(state, {...state.last_monitor_outcome, saved_preview:true}));
+    return;
+  }
   // Read-only preflight lets the wrapper use this exact selection/budget policy.
   if (process.argv?.includes('--print-execution-budget')) {
     const state = JSON.parse(fs.readFileSync(STATE, 'utf8'));
