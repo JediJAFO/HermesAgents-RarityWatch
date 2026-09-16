@@ -1,0 +1,13 @@
+{
+  "exotic": {
+    "prd": "McFarlane_Exotic_Watch_PRD",
+    "scripts": ["run_mcfarlane_exotic_deterministic.py", "exotic_execution_lock.py", "retry_mcfarlane_exotic_failures.py", "confirm_priority_exotic_listing_candidates.py", "refresh_exotic_current_pol_usd.py", "enrich_exotic_last_sales.py", "deliver_exotic_owed_heartbeat.py", "run_mcfarlane_exotic_whatsapp.py", "run-mcfarlane-exotic-whatsapp.js", "backup-exotic-watch.py"],
+    "price-watches": ["run_mcfarlane_exotic_deterministic.js", "exotic_whatsapp_policy.js", "mcfarlane_wallet_aliases.py"]
+  },
+  "sales": {
+    "prd": "McFarlane_DC_Sales_Alerts_PRD",
+    "scripts": ["run_mtd_sales_monitor.py", "retry_mtd_http400.py", "send_mtd_whatsapp_sales_only.py", "send_mtd_8am_last_five_heartbeat.py", "enrich_mtd_dc_metadata.py", "backup-mtd-sales-alerts.py"],
+    "price-watches": ["run_mcfarlane_dc_sales.py"]
+  },
+  "shared_scripts": ["monitor_backup.py", "monitor_backup_manifest.json", "refresh-mcfarlane-prds.py", "test_monitor_backup.py"]
+}

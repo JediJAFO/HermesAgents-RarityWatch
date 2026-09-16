@@ -1,0 +1,26 @@
+{
+  "kind": "exotic",
+  "files": {
+    "McFarlane_Exotic_Watch_PRD.docx": "3de48389892d2e5cd51d6d5e950932eee2ec41c1b6648811875df81c75dbdd14",
+    "McFarlane_Exotic_Watch_PRD.md": "33271c5acf85c87b75e6fe590f8c6cb10beb0d7d5b128363ebb0c3c74d41e632",
+    "RESTORE.md": "db67f409fbc8d8210817f5804dd4e0b3789ba552031ae18288009a104f0274f1",
+    "price-watches/exotic_whatsapp_policy.js": "ff6c1b4e4cb1695115c9f0c2d57ca90695dfe8e623a0cc7c5d581b1b65c79581",
+    "price-watches/mcfarlane_wallet_aliases.py": "bf80e4d3f788347ea4d0391ee6d0329e4e49e07a2fe31095b1258148cf5cd780",
+    "price-watches/run_mcfarlane_exotic_deterministic.js": "59bd9672d7aea25e4e77ccb493c84f83bb3fe2924c5c2756d2251736cbb821c1",
+    "restore-config.json": "35bbc68b1e58db3ff111c941f8e9a1bef4ac02fe9f3170d62c37f72f5b9fa76b",
+    "scripts/backup-exotic-watch.py": "61aa2d6f7734dcbae09b8a7cf18f5b72270f2abd7bb0cbca4bbb390fe0dadcf2",
+    "scripts/confirm_priority_exotic_listing_candidates.py": "73e25e491bef057f4801e2e119fdec6cc6b9e88f79cd42b272360159af5d83e8",
+    "scripts/deliver_exotic_owed_heartbeat.py": "f7edaa67dbe46115f44f706143776e722f98d60fcc98c2ae46f00bab76399e91",
+    "scripts/enrich_exotic_last_sales.py": "95c20b69ca59d7dae64a03db1de821ec2d6e0a1a67c09fd536945094037af6c3",
+    "scripts/exotic_execution_lock.py": "2c6241ef1b87da9fe8f75893a99b0527bb8947747f001a81c9b72f57d0dc9700",
+    "scripts/monitor_backup.py": "3937a2034b4c6b4362ca23f80b3e30b2c37ab8179439beb1d475628d9078d1a1",
+    "scripts/monitor_backup_manifest.json": "d3d180e75e5add277fa5f44c58ceb55ecc0534cbf8d55d1296daa6e00b091ed8",
+    "scripts/refresh-mcfarlane-prds.py": "83f4d148cee166a04d6878443dda6e746047f451e4eed7dcf7afd210cf5b7f10",
+    "scripts/refresh_exotic_current_pol_usd.py": "869c9b3af898874526213f46de486facc37892b99bf888d02dcdd3fa4e865832",
+    "scripts/retry_mcfarlane_exotic_failures.py": "e9f8947450ef167a0c9e7d697a219f9f3133ffa4d05b6655bdca9fdafff350ca",
+    "scripts/run-mcfarlane-exotic-whatsapp.js": "a75c512fac5c2b77733c58a18a1ee9974ac3dc39c7dbd0657dfe9c72ff2d728a",
+    "scripts/run_mcfarlane_exotic_deterministic.py": "b266448c737bb6e17cf1d54f4c87b101cba3d06e73ae96ee9e20db8a9d907c4d",
+    "scripts/run_mcfarlane_exotic_whatsapp.py": "2cb6adaa0f0414941209a3dc50084d7034e898845f46dc76ecc5e31227411b7f",
+    "scripts/test_monitor_backup.py": "7b4ff7ad0a28e42b5a2852fcdb72ea8d12fcacc83e79fbc22277aaefa0ee9f38"
+  }
+}

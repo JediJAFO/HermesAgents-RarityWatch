@@ -1,70 +1,62 @@
 # Product Requirements Document — McFarlane Exotic Watch
 
-**Version:** 2.0  
-**Last updated:** 2026-09-14 EDT  
-**Implementation signature:** `28830fdc5fda`  
-**Status:** Active, deterministic implementation  
-**Private state:** `C:/Users/jltfo/AppData/Local/hermes/price-watches/mcfarlane-exotics.json`
+**Version:** 3.0
+**Substantive implementation review:** 2026-09-15; local code and recurring configuration only, no live collection or delivery test.
+**Status:** Active implementation; deployment and delivery caveats below.
+**Private state:** HERMES_HOME/price-watches/mcfarlane-exotics.json (not backed up).
 
-## Purpose
+## Purpose and current scope
 
-Monitor the configured McFarlane Toys Digital collections for active **BUY NOW** listings whose product-page trait is **Rarity: Exotic**. Preserve verified listings and historical Exotic-sale context, publish an every-run Discord report, and send WhatsApp only for verified listing changes.
+Monitor 23 privately configured collections for verified BUY NOW listings with product-page Rarity: Exotic. Bids, purchases, wallet operations and payment UI are excluded. Historical Exotic sales are independent of present availability. The approved roster is private and must be supplied on restore; this document is not a collection inventory.
 
-## Scope and safeguards
+## Actual runtime and cadence
 
-- Tracks the ten configured collections held privately in the state file.
-- Counts BUY NOW listings only; bids, wallet actions, purchases, and payment UI are out of scope.
-- Runs at 00:00, 08:00, 12:00, 16:00, and 20:00 Eastern; WhatsApp delivery is scheduled 15 minutes after each main interval.
-- Uses a dedicated, isolated headless Chrome profile only—not the user's normal Chrome profile.
-- Navigates serially with at least a 10-second gap between every marketplace navigation, including product-trait checks.
-- Stops marketplace-wide work only for explicit 429, CAPTCHA/challenge, or access-denied evidence. Redirects, loading shells, missing controls, and timeouts are collection-local failures.
+- Hermes no-agent primary run_mcfarlane_exotic_deterministic.py owns a shared execution lease, refreshes current POL/USD, then invokes the Node collector run_mcfarlane_exotic_deterministic.js. Python psutil and the read-only cron execution ledger identify the actual scheduled occurrence.
+- Primary schedule: 00:00, 08:00, 12:00, 16:00 and 20:00 America/New_York. WhatsApp downstream: minute 15 of those hours. Priority confirmation: minute 14, not a guaranteed ten minutes after run completion; it can defer while the lease is busy.
+- Technical retry scheduler polls each minute; purchase-priority confirmation reads saved candidates first. Empty/not-due stages make no marketplace request.
+- Silent missing-history enrichment polls every 15 minutes, yields to primary/priority/retry work and uses the same lease.
+- Browser collection uses Playwright attached to a dedicated Chrome CDP endpoint on IPv6 loopback port 9222. Browser provisioning/supervision is external to the collector. The source does not prove an automatic browser restart service exists.
 
-## Collection verification workflow
+## Collection, verification and comparison
 
-1. Connect to the dedicated Chrome DevTools endpoint.
-2. Close abandoned pages in the dedicated monitor profile before beginning a run.
-3. For each saved filtered collection URL, verify the canonical URL retains its requested Exotic and in-stock filter parameters.
-4. Extract only cards clearly marked BUY NOW.
-5. For every active candidate, open its product page and require a rendered `Rarity: Exotic` trait before accepting it.
-6. Normalize listings by token identity, price, currency, and stable private name. Presentation-only card text changes must not create an alert.
-7. Retain last-known-good rows on unavailable/partial results and continue with the other collections.
-8. Enforce a bounded run budget. If insufficient time remains, return a safe partial result rather than timing out.
+- Collection navigation is serial, canonical filtered URLs are checked and BUY NOW cards are verified on token pages for the Exotic trait. Bid-only cards do not become listings. A missing/ambiguous control or loading shell is not proof of an empty collection.
+- The installed collector uses GAP_MS=10000, a 4-second load settle and two collection attempts. This is an implementation fact, not compliance with the saved operating preference for at least 15 seconds. Closing that pacing mismatch requires a separate runtime change.
+- Batch budget is min(1500, max(600, selected collection count × 60 + 120)) seconds; wrapper allowance adds 120 seconds, with preflight/rate-refresh outside that allowance. Scheduler timeout must allow the entire wrapper.
+- Explicit global blocking evidence stops work. Local failures and budget-skipped collections retain last-known-good rows. Checkpoints preserve verified progress; abandoned dedicated-browser pages are closed.
+- Differences are held as candidates until an independent matching observation promotes them. Candidate observations never supply confirmed removals. New token identity or a same-token/same-currency price cut of at least 10% is purchase-priority. Smaller decreases, removals and increases wait for ordinary confirmation.
+- Active seller enrichment uses active order makers and private aliases. Listing set time is separate from collection Activity sale time. Metadata-only, seller-only and valuation changes are not listing-change events.
 
-## Change confirmation and state
+## Reliability and recovery
 
-- A newly observed listing, disappearance, count change, token change, price change, or currency change is first held as a candidate.
-- The same normalized difference must appear in the next independent interval before it becomes a verified change.
-- Candidate or failed observations never overwrite a verified baseline and never create a WhatsApp event.
-- Verified changes create a deduplicated pending WhatsApp event; delivery records its fingerprint so it cannot send twice.
-- The collection Activity view remains authoritative for the saved last Exotic-sale price/time. Product pages verify the trait only.
+- Python and Node use a shared filesystem lease with inherited owner-token validation. Busy means defer; it must not spend retry budget. Stale leases fail closed and need owner/process inspection rather than blind deletion.
+- Technical recovery targets unresolved failures only, prioritizing budget-skipped names. Five retry stages use delays 1, 3, 5, 10 and 20 minutes, scheduled relative to each preceding outcome; they are not five absolute offsets from the original failure. Exhaustion is tied to primary generation and cannot be replenished by polling the same generation.
+- A primary partial result is reported once; intermediate incomplete targeted passes are suppressed. The unresolved set and confirmed undelivered deltas survive targeted passes; full recovery emits a resolved report.
+- Owed 08:00 heartbeat support now exists: wrapper arms pending8am before collection, Node claims it only after complete recovery and sufficiently fresh observations, and deliver_exotic_owed_heartbeat.py offers a saved-only handoff/status/verified-ledger repair helper. No recurring job for that helper was present in the inspected schedules; normal targeted recovery can claim the debt itself.
+- Heartbeat state records generation/handoff before the scheduler's actual Discord send. It is NOT a delivery acknowledgment: a downstream failure can lose the automatic replay opportunity. Runtime support and offline tests are not proof of a live delivered recovery heartbeat. Ledger schema, preserved primary job ID and correct process ancestry are prerequisites.
+- At this review's offline regression run, 24 of 25 existing Python reliability/context/enrichment/owed-heartbeat tests passed. The owed-heartbeat seed test failed because required_observation_at was absent instead of the ledger's actual started_at. This is a specific unresolved repair-path freshness gap, not proof that all heartbeat recovery works; rerun after a targeted runtime fix.
 
-## Notifications
+## Destination-specific output
 
-### Discord
+- Ordinary Discord no-change primary results are compact status only, not unchanged collection rows. Confirmed changes contain details only for affected collections and explicit removals, including partial removals.
+- The actual scheduled primary 08:00 ET occurrence is the compact active-listings exception: one concise collection/price line per active listing, with POL and USD; no seller, history, timestamp or link. Manual runs at 08:00 do not qualify merely because of wall time. If owed, it can accompany the eventual resolved output; already-handed-off dates are not replayed automatically.
+- WhatsApp uses the separate exotic_whatsapp_policy.js and saved-only downstream script. Only independently confirmed new listings and same-token/same-currency decreases of any size are eligible. No removals, increases, unchanged inventory, currency-only or metadata-only changes. The 10% threshold controls urgency, not final WhatsApp eligibility.
+- Downstream stdout is handed to Hermes delivery; consuming a queue is not proof the destination received it. Saved review/preview tools are not part of ordinary delta output.
 
-Discord receives every primary interval report.
+## Valuation and historical enrichment
 
-- No verified change: active listings only.
-- Verified change: complete collection status.
-- Partial run: identifies unavailable collections and confirms their last-known-good data was retained.
-- Public formatting uses `POL`, green emphasis for active rows, `last:` for historical sales, and masked no-preview View links.
+- Current POL/USD is refreshed before collection; source failure retains the saved rate and does not intentionally block the collector. Current listing USD is display-only.
+- Last Exotic sale is selected from completed Activity and independently verified on a rendered product trait page. The resumable missing-history worker excludes user-disabled/terminal searches, persists pagination/progress, paces requests and cools down failures. Missing or exhausted history means not verified, never proof of no sale.
+- Saved sale-time priceUsd/amountUsd or historical cached valuation remains historical; do not reprice old sales using current POL spot.
 
-### WhatsApp
+## Backup, restore and verification boundary
 
-WhatsApp receives only a verified, undelivered change event.
+The explicit monitor_backup_manifest.json includes the Python wrapper, Node collector and dynamically required WhatsApp policy, shared lease, technical retries, priority confirmation, spot-rate refresh, missing-history worker, alias resolver code, owed-heartbeat helper and backup/PRD utilities. Only code and these PRDs enter the source snapshot. No live state, raw aliases, wallets, private URLs, destinations, credentials, logs or browser profiles are copied. Python/Node packages are declared dependencies, not bundled binaries.
 
-- No change, candidate-only result, or failure-only result returns `[SILENT]`.
-- Messages contain no URLs, token IDs, contract IDs, or NFT item names.
-- Active rows use `🟢 YES`, `POL`, and `Last:`.
+RESTORE.md and restore-config.json describe relocation placeholders, required private configuration, disabled schedule templates, browser/Node installation and controlled rebaseline. This is not a complete stateful disaster-recovery backup: previous dedupe, pending delivery, exact roster and history require separate private recovery. Legacy repository data/history is not retroactively sanitized.
 
-## Reliability requirements
+Automated refresh fingerprints every manifest source plus stable relevant recurring schedule semantics and private roster identity. It marks drift; it never advances a human/substantive review date merely because hashes changed. Markdown content changes regenerate DOCX. Daily backup checks a per-ET-day success/attempt cap before repository mutation, detects identical snapshots, refuses dirty repositories and legacy data artifacts, stages explicit files only and verifies the remote commit after a push. Local snapshot validation does not claim a cloud update.
 
-1. Dedicated Chrome is reset independently of the user's browser when its monitor-only profile becomes unhealthy.
-2. Every run removes stale monitor tabs before collection work.
-3. Connection, navigation, loading, product-trait, and budget failures retain state and report partial status rather than producing a false change.
-4. No change can be promoted or delivered unless it survives independent-interval confirmation.
-5. The monitor's Discord and WhatsApp delivery stages are deterministic no-agent scripts; browser collection does not require an LLM runtime.
-
-## Backup and review
-
-The sanitized Exotic backup includes this Markdown PRD and its DOCX counterpart. Before the daily Exotic backup evaluates changes, the PRD refresh step reviews the current deterministic implementation and only rewrites the PRD when the tracked implementation signature changed. Private live state, credentials, logs, token identifiers, and source URLs are excluded from the backup.
+<!-- automated-drift:start -->
+**Observed implementation fingerprint:** `938619d219c11d523ea0d3645c408e5f4d70e9d661d7f1232e2d097802e0d8c2`
+**Automated drift status:** changed or unreviewed; substantive review required. Hash comparison is not a requirements review.
+<!-- automated-drift:end -->

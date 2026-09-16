@@ -1,9 +1,9 @@
 /* Deterministic McFarlane Exotic collector: isolated Chrome only. */
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('C:/Users/jltfo/AppData/Local/hermes/hermes-agent/node_modules/playwright');
+const { chromium } = require('__HERMES_HOME__/hermes-agent/node_modules/playwright');
 
-const ROOT = 'C:/Users/jltfo/AppData/Local/hermes/price-watches';
+const ROOT = '__HERMES_HOME__/price-watches';
 const whatsappPolicy = require(path.join(ROOT, 'exotic_whatsapp_policy.js'));
 const STATE = path.join(ROOT, 'mcfarlane-exotics.json');
 const RUN = path.join(ROOT, 'mcfarlane-deterministic-run.json');
@@ -24,8 +24,11 @@ const ET = new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/New_York', year
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const now = () => {
-  const p = Object.fromEntries(ET.formatToParts(new Date()).filter(x => x.type !== 'literal').map(x => [x.type, x.value]));
-  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}-04:00`;
+  const instant = new Date();
+  const p = Object.fromEntries(ET.formatToParts(instant).filter(x => x.type !== 'literal').map(x => [x.type, x.value]));
+  const offset = Math.round((Date.UTC(Number(p.year), Number(p.month)-1, Number(p.day), Number(p.hour), Number(p.minute), Number(p.second)) - Math.floor(instant.getTime()/1000)*1000)/60000);
+  const zone = `${offset < 0 ? '-' : '+'}${String(Math.floor(Math.abs(offset)/60)).padStart(2,'0')}:${String(Math.abs(offset)%60).padStart(2,'0')}`;
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}${zone}`;
 };
 function atomicJson(file, value) {
   const tmp = `${file}.${process.pid}.tmp`;
@@ -365,7 +368,11 @@ function heartbeatReport(state, outcome = {}) {
   return lines.join('\r\n') + '\r\n';
 }
 function report(state, outcome) {
-  if (outcome.daily_heartbeat_date) return heartbeatReport(state, outcome);
+  if (outcome.daily_heartbeat_date) {
+    const heartbeat = heartbeatReport(state, outcome);
+    return (outcome.discord_changes || []).length
+      ? heartbeat + '\r\n' + report(state, {...outcome, daily_heartbeat_date:null}) : heartbeat;
+  }
   const changedNames = new Set((outcome.discord_changes || []).map(x => x.name));
   const lines = [];
   if (outcome.failed_collections.length) {
@@ -389,12 +396,30 @@ function report(state, outcome) {
 // A primary scheduled full run always reports its first result. Targeted
 // recovery passes are silent while incomplete and emit once when they clear
 // the outstanding checks from that primary run.
-function recordPartialDeliveryPolicy(state, outcome) {
-  const heartbeatDate = dailyHeartbeatDate(state, outcome);
-  if (heartbeatDate) {
-    outcome.daily_heartbeat_date = heartbeatDate;
-    state.discord_daily_heartbeat = {date:heartbeatDate, generation:state.last_primary_exotic_run_id, generated_at:outcome.at};
+function armDailyHeartbeat(state, outcome) {
+  const date = dailyHeartbeatDate(state, outcome);
+  if (date && (!state.pending8am || state.pending8am.date < date)) {
+    const occurrence = JSON.parse(process.env.MCFARLANE_PRIMARY_OCCURRENCE);
+    state.pending8am = {date, generation:state.last_primary_exotic_run_id, execution_id:occurrence.execution_id, scheduled_at:occurrence.scheduled_at, required_observation_at:outcome.at, armed_at:outcome.at};
   }
+}
+function claimDailyHeartbeat(state, outcome) {
+  const pending = state.pending8am;
+  if (!pending || outcome.complete !== true || (outcome.failed_collections || []).length) return null;
+  const scheduled = Date.parse(pending.required_observation_at || pending.scheduled_at);
+  if (!Number.isFinite(scheduled) || !state.collections.length || state.collections.some(c =>
+      !c.baseline || !(Date.parse(c.last_successful_observation) >= scheduled))) return null;
+  if (state.discord_daily_heartbeat?.date >= pending.date) { delete state.pending8am; return null; }
+  const p = Object.fromEntries(ET.formatToParts(new Date(outcome.at)).map(x => [x.type,x.value]));
+  if (pending.date !== `${p.year}-${p.month}-${p.day}`) return null;
+  state.discord_daily_heartbeat = {...pending, generated_at:outcome.at};
+  delete state.pending8am;
+  return pending.date;
+}
+function recordPartialDeliveryPolicy(state, outcome) {
+  armDailyHeartbeat(state, outcome);
+  const heartbeatDate = claimDailyHeartbeat(state, outcome);
+  if (heartbeatDate) outcome.daily_heartbeat_date = heartbeatDate;
   // Persist only undelivered, confirmed events. Legacy states have no queue;
   // never reconstruct removals from a held candidate or a boolean change flag.
   const queued = Array.isArray(state.pending_discord_listing_changes) ? state.pending_discord_listing_changes : [];
@@ -462,7 +487,27 @@ async function main() {
   }
   const release = acquireExecutionLock();
   if (!release) { process.exitCode = 75; return; }
-  try { await collectMain(); } finally { release(); }
+  try {
+    if (process.argv?.includes('--arm-scheduled-heartbeat')) {
+      const state = JSON.parse(fs.readFileSync(STATE, 'utf8'));
+      armDailyHeartbeat(state, {scope:'full',at:now()});
+      atomicJson(STATE, state);
+      return;
+    }
+    if (process.argv?.includes('--handoff-saved-owed-heartbeat')) {
+      const state = JSON.parse(fs.readFileSync(STATE, 'utf8'));
+      const outcome = {...state.last_monitor_outcome, at:now()};
+      const date = claimDailyHeartbeat(state, outcome);
+      if (date) {
+        const text = heartbeatReport(state, {...outcome, daily_heartbeat_date:date});
+        atomicJson(STATE, state);
+        atomicText(path.join(ROOT, 'mcfarlane-owed-heartbeat.md'), text);
+        process.stdout.write(text);
+      }
+      return;
+    }
+    await collectMain();
+  } finally { release(); }
 }
 async function collectMain() {
   const state = JSON.parse(fs.readFileSync(STATE, 'utf8'));
@@ -474,6 +519,9 @@ async function collectMain() {
   run.batch_budget_ms = BATCH_DEADLINE_MS;
   run.scope = !requestedNames.size && !process.env.MCFARLANE_RUN_KIND && selectedCollections.length === state.collections.length ? 'full' : 'targeted';
   if (run.scope === 'full') state.last_primary_exotic_run_id = require('crypto').randomUUID();
+  armDailyHeartbeat(state, run);
+  // Persist debt before CDP/startup: a thrown connection cannot erase the 8AM occurrence.
+  atomicJson(STATE, state);
   const selectedNames = new Set(selectedCollections.map(c => c.name));
   const outstanding = run.scope === 'targeted'
     ? (state.last_monitor_outcome?.failed_collections || []).filter(x => !selectedNames.has(x.name)) : [];

@@ -1,0 +1,104 @@
+{
+  "kind": "exotic",
+  "schedules": [
+    {
+      "script": "backup-exotic-watch.py",
+      "schedule": {
+        "kind": "cron",
+        "expr": "40 23 * * *"
+      },
+      "configured_enabled": true,
+      "enabled": false,
+      "no_agent": true,
+      "timezone": "America/New_York",
+      "delivery": "CONFIGURE_PRIVATELY"
+    },
+    {
+      "script": "confirm_priority_exotic_listing_candidates.py",
+      "schedule": {
+        "kind": "cron",
+        "expr": "14 0,8,12,16,20 * * *"
+      },
+      "configured_enabled": true,
+      "enabled": false,
+      "no_agent": true,
+      "timezone": "America/New_York",
+      "delivery": "CONFIGURE_PRIVATELY"
+    },
+    {
+      "script": "enrich_exotic_last_sales.py",
+      "schedule": {
+        "kind": "cron",
+        "expr": "*/15 * * * *"
+      },
+      "configured_enabled": true,
+      "enabled": false,
+      "no_agent": true,
+      "timezone": "America/New_York",
+      "delivery": "CONFIGURE_PRIVATELY"
+    },
+    {
+      "script": "retry_mcfarlane_exotic_failures.py",
+      "schedule": {
+        "kind": "cron",
+        "expr": "* * * * *"
+      },
+      "configured_enabled": true,
+      "enabled": false,
+      "no_agent": true,
+      "timezone": "America/New_York",
+      "delivery": "CONFIGURE_PRIVATELY"
+    },
+    {
+      "script": "run_mcfarlane_exotic_deterministic.py",
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 0,8,12,16,20 * * *"
+      },
+      "configured_enabled": true,
+      "enabled": false,
+      "no_agent": true,
+      "timezone": "America/New_York",
+      "delivery": "CONFIGURE_PRIVATELY"
+    },
+    {
+      "script": "run_mcfarlane_exotic_whatsapp.py",
+      "schedule": {
+        "kind": "cron",
+        "expr": "15 0,8,12,16,20 * * *"
+      },
+      "configured_enabled": true,
+      "enabled": false,
+      "no_agent": true,
+      "timezone": "America/New_York",
+      "delivery": "CONFIGURE_PRIVATELY"
+    }
+  ],
+  "restore_ready": false,
+  "private_inputs_required": [
+    "collection allowlist and exact filtered URLs",
+    "verified baseline/dedupe state or controlled no-alert rebaseline",
+    "delivery destinations",
+    "RARIBLE_API_KEY",
+    "optional private wallet aliases"
+  ],
+  "python": [
+    "python-docx",
+    "psutil",
+    "tzdata"
+  ],
+  "node": [
+    "playwright"
+  ],
+  "excluded": [
+    "raw state",
+    "wallet alias database",
+    "credentials",
+    "chat IDs",
+    "execution ledger",
+    "logs",
+    "browser profiles",
+    "node_modules",
+    "Python environment"
+  ]
+}
