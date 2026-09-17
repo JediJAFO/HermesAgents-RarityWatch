@@ -35,7 +35,7 @@ def scheduled_heartbeat_context(env=None, ledger=None, ancestor_pids=None):
                     break
         with closing(sqlite3.connect(Path(ledger).as_uri() + '?mode=ro', uri=True, timeout=2)) as conn:
             rows = conn.execute("SELECT id, pid, scheduled_instant FROM executions WHERE job_id=? AND status='running'",
-                                ('7fbfa20e145b',)).fetchall()
+                                ('__PRIVATE_JOB_ID__',)).fetchall()
         # No-agent scheduler scripts do not export the cron ContextVar. In that
         # case accept only their direct scheduler parent, never a shell/manual
         # descendant that merely shares the gateway ancestor.

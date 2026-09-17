@@ -1,7 +1,7 @@
 # Product Requirements Document — McFarlane Exotic Watch
 
 **Version:** 3.0
-**Substantive implementation review:** 2026-09-15; local code and recurring configuration only, no live collection or delivery test.
+**Agent source audit:** 2026-09-16; local code and recurring configuration only, no human approval, live collection or delivery test implied.
 **Status:** Active implementation; deployment and delivery caveats below.
 **Private state:** HERMES_HOME/price-watches/mcfarlane-exotics.json (not backed up).
 
@@ -22,7 +22,7 @@ Monitor 23 privately configured collections for verified BUY NOW listings with p
 - Collection navigation is serial, canonical filtered URLs are checked and BUY NOW cards are verified on token pages for the Exotic trait. Bid-only cards do not become listings. A missing/ambiguous control or loading shell is not proof of an empty collection.
 - The installed collector uses GAP_MS=10000, a 4-second load settle and two collection attempts. This is an implementation fact, not compliance with the saved operating preference for at least 15 seconds. Closing that pacing mismatch requires a separate runtime change.
 - Batch budget is min(1500, max(600, selected collection count × 60 + 120)) seconds; wrapper allowance adds 120 seconds, with preflight/rate-refresh outside that allowance. Scheduler timeout must allow the entire wrapper.
-- Explicit global blocking evidence stops work. Local failures and budget-skipped collections retain last-known-good rows. Checkpoints preserve verified progress; abandoned dedicated-browser pages are closed.
+- Explicit global blocking evidence stops work. Local failures and budget-skipped collections retain last-known-good rows. Checkpoints preserve verified progress. The collector creates and closes its own page; it does not enumerate or close unrelated tabs. One bounded owned-page reconnect is permitted within the remaining deadline. Replaced-page cleanup is not guaranteed by the inspected recovery branch.
 - Differences are held as candidates until an independent matching observation promotes them. Candidate observations never supply confirmed removals. New token identity or a same-token/same-currency price cut of at least 10% is purchase-priority. Smaller decreases, removals and increases wait for ordinary confirmation.
 - Active seller enrichment uses active order makers and private aliases. Listing set time is separate from collection Activity sale time. Metadata-only, seller-only and valuation changes are not listing-change events.
 
@@ -54,9 +54,11 @@ The explicit monitor_backup_manifest.json includes the Python wrapper, Node coll
 
 RESTORE.md and restore-config.json describe relocation placeholders, required private configuration, disabled schedule templates, browser/Node installation and controlled rebaseline. This is not a complete stateful disaster-recovery backup: previous dedupe, pending delivery, exact roster and history require separate private recovery. Legacy repository data/history is not retroactively sanitized.
 
-Automated refresh fingerprints every manifest source plus stable relevant recurring schedule semantics and private roster identity. It marks drift; it never advances a human/substantive review date merely because hashes changed. Markdown content changes regenerate DOCX. Daily backup checks a per-ET-day success/attempt cap before repository mutation, detects identical snapshots, refuses dirty repositories and legacy data artifacts, stages explicit files only and verifies the remote commit after a push. Local snapshot validation does not claim a cloud update.
+Automated refresh fingerprints every manifest source plus stable relevant recurring schedule semantics, private roster identity and allowlisted declarative policies. Declarations may themselves lag code; hashing them does not certify compliance. Observation timestamps, results and delivery queues do not create drift. It never advances a human review date merely because hashes changed. Markdown content changes regenerate DOCX. Daily backup checks a per-ET-day success/attempt cap before repository mutation, detects identical snapshots, refuses dirty repositories and legacy data artifacts, stages explicit files only and verifies the remote commit after a push. Original scheduler IDs are replaced with private restore placeholders; snapshot verification rejects extra files and scans DOCX package text, metadata and external relationships. Local snapshot validation does not claim a cloud update.
+
+The enabled daily backup remains at 23:40 America/New_York. Offline readiness is not permission to run a monitor, deliver notifications or push. Existing repository history and legacy non-manifest files require separate review; source-only snapshot validation covers the new snapshot, not historical commits.
 
 <!-- automated-drift:start -->
-**Observed implementation fingerprint:** `938619d219c11d523ea0d3645c408e5f4d70e9d661d7f1232e2d097802e0d8c2`
+**Observed implementation fingerprint:** `fc01519200a89916e715d32790f66535ce8f6212573ffd9f134bd8f81f42b9ad`
 **Automated drift status:** changed or unreviewed; substantive review required. Hash comparison is not a requirements review.
 <!-- automated-drift:end -->

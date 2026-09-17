@@ -1,4 +1,7 @@
 {
+  "schema_version": 2,
+  "snapshot_policy": "Explicit source-only allowlists; no live state, original job IDs, credentials, wallets, destinations, browser profiles or environments. Restore requires private inputs; all schedule templates are disabled.",
+  "external_dependencies": {"python": ["python-docx", "psutil", "tzdata"], "node": ["playwright"], "deployment": ["Hermes scheduler", "dedicated Chrome CDP", "Git for scheduled backups"]},
   "exotic": {
     "prd": "McFarlane_Exotic_Watch_PRD",
     "scripts": ["run_mcfarlane_exotic_deterministic.py", "exotic_execution_lock.py", "retry_mcfarlane_exotic_failures.py", "confirm_priority_exotic_listing_candidates.py", "refresh_exotic_current_pol_usd.py", "enrich_exotic_last_sales.py", "deliver_exotic_owed_heartbeat.py", "run_mcfarlane_exotic_whatsapp.py", "run-mcfarlane-exotic-whatsapp.js", "backup-exotic-watch.py"],

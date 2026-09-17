@@ -361,7 +361,11 @@ function heartbeatReport(state, outcome = {}) {
       const pricedState = validRate ? state : {...state, current_pol_usd:undefined};
       const price = listingPriceText(listing, pricedState);
       const usdMissing = !validRate || listing.currency !== 'POLYGON';
-      lines.push(`• ${aliases.get(c.name)} — ${price}${usdMissing ? ' (USD unavailable)' : ''}`);
+      const seller = String(listing.seller_name_tag || '').replace(/\s+/g, ' ').trim();
+      const wallet = String(listing.seller_wallet || '').trim();
+      const sellerLabel = seller && !/0x[0-9a-f]{40}/i.test(seller)
+        ? seller : (wallet ? `...${wallet.slice(-4)}` : 'Seller not recorded');
+      lines.push(`• ${aliases.get(c.name)} — ${price}${usdMissing ? ' (USD unavailable)' : ''} — ${sellerLabel}`);
     }
   }
   if (!lines.some(x => x.startsWith('•'))) lines.push('No active listings in saved verified state.');

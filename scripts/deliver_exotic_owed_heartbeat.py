@@ -27,7 +27,7 @@ def seed(execution_id, now=None):
     now = now or datetime.now(ET)
     with closing(sqlite3.connect(LEDGER.as_uri()+'?mode=ro',uri=True)) as conn:
         row = conn.execute('SELECT scheduled_instant,status FROM executions WHERE id=? AND job_id=?',
-                           (execution_id,'7fbfa20e145b')).fetchone()
+                           (execution_id,'__PRIVATE_JOB_ID__')).fetchone()
     if not row or not row[0] or row[1] not in ('running','completed'):
         raise ValueError('Not a verified primary scheduled execution')
     scheduled = datetime.fromisoformat(row[0].replace('Z','+00:00'))

@@ -47,12 +47,20 @@ def fingerprint(kind, jobs=None):
     state=json.loads((HOME/'price-watches'/('mcfarlane-exotics.json' if kind=='exotic' else 'mcfarlane-dc-sales.json')).read_text(encoding='utf-8'))
     scope=[{k:c[k] for k in ('id','name','contract','source_url','category') if k in c} for c in state['collections']]
     h.update(json.dumps(sorted(scope,key=lambda c:json.dumps(c,sort_keys=True)),sort_keys=True).encode())
+    # Hash declarative policies privately, never raw results, delivery queues,
+    # baselines, enrichment progress or last-run telemetry. Declarations can
+    # drift from code; a changed hash is a review signal, not compliance proof.
+    policy={k:state[k] for k in ('alert_rule','cadence','collection_failure_policy',
+            'display_policy','activity_incremental_review','delivery_policy','scope') if k in state}
+    h.update(json.dumps(policy,sort_keys=True,separators=(',',':')).encode())
     return h.hexdigest()
 
 def sanitized_source(text):
     # Restored sources are materialized only after operator selects a new root.
     text=text.replace(HOME.as_posix(),'__HERMES_HOME__').replace(str(HOME).replace('\\','/'),'__HERMES_HOME__')
     text=text.replace('__DOCUMENTS__','__DOCUMENTS__').replace('__USER_HOME__','__USER_HOME__')
+    # Hermes job identities are deployment inputs, not portable source values.
+    text=re.sub(r"(?<=[\"'])[0-9a-f]{12}(?=[\"'])", '__PRIVATE_JOB_ID__', text)
     return text
 
 def scan(text):
@@ -77,8 +85,7 @@ def snapshot(kind, target, docs=DOCS):
         src=docs/(spec['prd']+'.'+ext); dest=target/src.name
         if ext=='md': scan(src.read_text(encoding='utf-8'))
         else:
-            from docx import Document
-            scan('\n'.join(p.text for p in Document(src).paragraphs))
+            scan_docx(src)
         shutil.copy2(src,dest); names.append(dest.name)
     config={'kind':kind,'schedules':schedules(kind),'restore_ready':False,
             'private_inputs_required':['collection allowlist and exact filtered URLs','verified baseline/dedupe state or controlled no-alert rebaseline','delivery destinations','RARIBLE_API_KEY','optional private wallet aliases'],
@@ -94,7 +101,7 @@ Copy scripts/ and price-watches/ preserving their sibling layout. Materialize __
 
 Start a dedicated Chrome instance bound to loopback CDP port 9222, with a NEW monitor-only user-data directory. Never reuse a normal browser profile, expose CDP externally, or terminate user Chrome processes. Both collector and enrichment currently expect http://[::1]:9222. Browser startup/supervision and scheduler installation are deployment responsibilities, not bundled services.
 
-Install Hermes independently. Recreate no-agent cron schedules from restore-config.json using supported Hermes scheduling controls, configure timezone America/New_York and destinations privately. Preserve/map the Exotic primary job ID in the two heartbeat-context scripts: they currently refer to the original ID. The executions.db schema must provide id, job_id, pid, status, scheduled_instant. Scheduler timeouts must exceed the collector budget plus preflight.
+Install Hermes independently. Recreate no-agent cron schedules from restore-config.json using supported Hermes scheduling controls, configure timezone America/New_York and destinations privately. Replace __PRIVATE_JOB_ID__ in the two Exotic heartbeat-context scripts with the new primary job identity. Original job IDs are not included. The executions.db schema must provide id, job_id, pid, status, scheduled_instant. Scheduler timeouts must exceed the collector budget plus preflight.
 
 Supply private mcfarlane-exotics.json or mcfarlane-dc-sales.json in price-watches. Exact collection URLs/allowlists, historic baselines, dedupe and pending delivery records are deliberately NOT here. Supply mcfarlane-wallet-aliases.json (an empty exact_aliases/masked_aliases structure is acceptable) and mcfarlane-pol-usd-daily.json (empty rates object is acceptable for sales). RARIBLE_API_KEY is injected via the runtime secret facility, never this repository. A lost baseline requires a separately approved silent rebaseline before alerts; do not start against an empty production state or replay saved pending events.
 
@@ -105,21 +112,71 @@ No automatically restored live state or end-to-end marketplace/delivery claim is
     (target/'snapshot-manifest.json').write_text(json.dumps({'kind':kind,'files':inventory},indent=2)+'\n',encoding='utf-8')
     return names+['snapshot-manifest.json']
 
+def scan_docx(path):
+    import zipfile
+    from xml.etree import ElementTree as ET
+    with zipfile.ZipFile(path) as package:
+        if package.testzip(): raise ValueError('Corrupt DOCX package')
+        for name in package.namelist():
+            if name.endswith(('.xml','.rels')):
+                root=ET.fromstring(package.read(name))
+                scan(' '.join(root.itertext()))
+                for element in root.iter():
+                    if element.get('TargetMode') == 'External': scan(element.get('Target',''))
+            elif name.startswith(('word/embeddings/','word/media/')):
+                raise ValueError('Unreviewed embedded DOCX binary')
+
 def verify(target):
     target=Path(target); inventory=json.loads((target/'snapshot-manifest.json').read_text(encoding='utf-8'))
+    actual={p.relative_to(target).as_posix() for p in target.rglob('*') if p.is_file()}
+    if actual - (set(inventory['files']) | {'snapshot-manifest.json'}):
+        raise ValueError('Unlisted snapshot files')
     required={p.relative_to(HOME).as_posix() for p in source_paths(inventory['kind'])}
     if not required.issubset(inventory['files']):
         raise ValueError('Manifest omits required runtime dependency')
+    stem=manifest()[inventory['kind']]['prd']
+    approved=required | {stem+'.md',stem+'.docx','RESTORE.md','restore-config.json'}
+    if set(inventory['files']) != approved:
+        raise ValueError('Snapshot inventory differs from explicit allowlist')
     for name,digest in inventory['files'].items():
         p=target/name
+        if Path(name).is_absolute() or '..' in Path(name).parts or p.is_symlink(): raise ValueError('Unsafe snapshot path')
         if not p.is_file() or hashlib.sha256(p.read_bytes()).hexdigest()!=digest: raise ValueError('Missing or changed artifact: '+name)
         if p.suffix in ('.py','.js','.json','.md'):
             text=p.read_text(encoding='utf-8'); scan(text)
             if p.suffix=='.py': ast.parse(text,filename=name)
+        elif p.suffix=='.docx': scan_docx(p)
     return len(inventory['files'])
 
 def daily_allowed(stamp,today):
     return not stamp.exists() or stamp.read_text(encoding='utf-8').strip()!=today
+
+def repository_gate(repo, git, names):
+    """Shared fail-closed gate; only hash-preserved, reviewed deletions allowed."""
+    approval=repo/'.git/monitor-backup-cleanup.json'
+    reviewed=json.loads(approval.read_text(encoding='utf-8'))['deletions'] if approval.exists() else {}
+    tracked=set(git('ls-files').splitlines())
+    deletions=[]
+    for name, record in reviewed.items():
+        if name not in tracked: continue  # already committed removal
+        if name in names or Path(name).is_absolute() or '..' in Path(name).parts:
+            raise RuntimeError('Unsafe cleanup approval')
+        saved=Path(record['saved'])
+        if saved.resolve().is_relative_to(repo.resolve()) or not saved.is_file() or hashlib.sha256(saved.read_bytes()).hexdigest()!=record['sha256']:
+            raise RuntimeError('Cleanup quarantine missing or changed')
+        if (repo/name).exists(): raise RuntimeError('Reviewed deletion reappeared')
+        deletions.append(name)
+    owned={'backup/.last-successful-backup-date','backup/.last-push-attempt-date'}
+    for line in git('status','--porcelain','--untracked-files=all').splitlines():
+        name=line[3:]
+        if name in owned or re.fullmatch(r'backup/\.push-attempt-\d{4}-\d{2}-\d{2}',name):
+            if line[:2]!='??': raise RuntimeError('Tracked backup marker change')
+            continue
+        if name in deletions and line[:2] in (' D','D '): continue
+        raise RuntimeError('Backup repository is not clean; review existing changes before backup')
+    extras=tracked-set(names)-set(deletions)-{'.gitignore'}
+    if extras: raise RuntimeError('Legacy artifacts require explicit repository cleanup: '+', '.join(sorted(extras)))
+    return sorted(deletions)
 
 def backup_main(kind):
     parser=argparse.ArgumentParser()
@@ -136,24 +193,17 @@ def backup_main(kind):
         print('Daily cap: backup already succeeded or push was attempted today; deferred.'); return
     subprocess.run([os.sys.executable,str(HOME/'scripts/refresh-mcfarlane-prds.py')],check=True,timeout=120)
     env=dict(os.environ,GIT_TERMINAL_PROMPT='0')
-    def git(*a): return subprocess.run(['git',*a],cwd=repo,env=env,text=True,capture_output=True,check=True,timeout=120).stdout.strip()
-    status=git('status','--porcelain','--untracked-files=all').splitlines()
-    owned_local={'backup/.last-successful-backup-date','backup/.last-push-attempt-date'}
-    if any(line[3:] not in owned_local and not re.fullmatch(r'backup/\.push-attempt-\d{4}-\d{2}-\d{2}',line[3:]) for line in status):
-        raise RuntimeError('Backup repository is not clean; review existing changes before backup (nothing staged or pushed)')
+    def git(*a): return subprocess.run(['git',*a],cwd=repo,env=env,text=True,capture_output=True,check=True,timeout=120).stdout.rstrip('\n')
     with tempfile.TemporaryDirectory(prefix='monitor-snapshot-') as tmp:
         names=snapshot(kind,Path(tmp)); verify(Path(tmp))
-        # Refuse legacy state/report retention rather than silently committing it.
-        tracked=git('ls-files').splitlines()
-        forbidden=[n for n in tracked if n.startswith('monitor/') or 'wallet-aliases.json' in n]
-        if forbidden: raise RuntimeError('Legacy data artifacts require explicit repository cleanup before source-only backup')
+        deletions=repository_gate(repo,git,names)
         changed=[n for n in names if not (repo/n).exists() or (repo/n).read_bytes()!=(Path(tmp)/n).read_bytes()]
-        if not changed:
+        if not changed and not deletions:
             print('No sanitized monitor changes to back up.'); return
         for n in changed:
             (repo/n).parent.mkdir(parents=True,exist_ok=True); shutil.copy2(Path(tmp)/n,repo/n)
-        git('add','--',*changed)
-        git('-c','user.name=Monitor backup','-c','user.email=monitor@users.noreply.github.com','commit','-m',f'backup: {kind} source snapshot {today}','--',*changed)
+        git('add','-A','--',*(changed+deletions))
+        git('-c','user.name=Monitor backup','-c','user.email=monitor@users.noreply.github.com','commit','-m',f'backup: {kind} source snapshot {today}','--',*(changed+deletions))
         reservation.parent.mkdir(parents=True,exist_ok=True)
         # Fail closed on uncertain push outcome: no second attempt this ET day.
         with reservation.open('x',encoding='utf-8') as handle:
