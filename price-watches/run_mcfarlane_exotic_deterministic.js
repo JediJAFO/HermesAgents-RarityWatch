@@ -49,6 +49,20 @@ function sameFilteredUrl(actual, expected) {
     return canonical(normalize(a)) === canonical(normalize(e));
   } catch { return false; }
 }
+function certificateAuthorityError(error) {
+  return /\bERR_CERT_AUTHORITY_INVALID\b/.test(String(error?.message || error));
+}
+async function certificatePreflight(page) {
+  // Use the same validating, dedicated CDP browser as collection, never a bypass.
+  const url = 'https://mcfarlanetoys.digital/';
+  try {
+    const response = await page.goto(url, {waitUntil: 'commit', timeout: 25000});
+    return {kind: response && new URL(response.url()).origin === new URL(url).origin ? 'VERIFIED' : 'UNAVAILABLE', url};
+  } catch (error) {
+    return {kind: certificateAuthorityError(error) ? 'CERTIFICATE_FAILURE' : 'UNAVAILABLE',
+      url, reason: String(error.stack || error.message || error)};
+  }
+}
 function explicitBlock(text) {
   const t = text.toLowerCase();
   return /\b429\b|captcha|challenge|access denied|you have been blocked|temporarily blocked/.test(t);
@@ -372,6 +386,9 @@ function heartbeatReport(state, outcome = {}) {
   return lines.join('\r\n') + '\r\n';
 }
 function report(state, outcome) {
+  if (outcome.shared_failure === 'certificate_authority_invalid') {
+    return 'McFarlane Exotic Watch — HTTPS certificate validation failed; listings unavailable. All last-known-good listings retained. Will check again at the next primary interval.\r\n';
+  }
   if (outcome.daily_heartbeat_date) {
     const heartbeat = heartbeatReport(state, outcome);
     return (outcome.discord_changes || []).length
@@ -547,7 +564,15 @@ async function collectMain() {
       return page;
     };
 
-    for (const collection of selectedCollections) {
+    run.preflight = await certificatePreflight(page);
+    lastNavigation = true; // First collection must also observe the 10-second gap.
+    if (run.preflight.kind === 'CERTIFICATE_FAILURE') {
+      run.shared_failure = 'certificate_authority_invalid';
+      run.global_stop = true;
+      run.global_reason = run.preflight.reason;
+      run.results = selectedCollections.map(c => ({name:c.name, kind:'UNAVAILABLE', reason:run.global_reason, attempts:0}));
+    }
+    for (const collection of run.global_stop ? [] : selectedCollections) {
       if (Date.now() - startedAt > BATCH_DEADLINE_MS) {
         run.timed_out = true;
         run.results.push({ name: collection.name, kind: 'UNAVAILABLE', reason: 'batch time budget reached before collection check' });
@@ -570,6 +595,11 @@ async function collectMain() {
   if (run.global_stop || run.fatal_error || run.results.length !== selectedCollections.length) {
     const reason = run.global_reason || run.fatal_error || 'incomplete deterministic result set';
     const outcome = { at: run.at, complete: false, changed: false, scope: run.scope, failed_collections: [...outstanding, ...selectedCollections.map(c => ({ name: c.name, type: reason }))] };
+    if (run.shared_failure) {
+      outcome.shared_failure = run.shared_failure;
+      state.shared_certificate_failure = {code:run.shared_failure, at:run.at, detail:reason};
+      delete state.automatic_exotic_retry_state;
+    }
     state.last_monitor_outcome = outcome;
     const deliver = recordPartialDeliveryPolicy(state, outcome);
     atomicJson(STATE, state);

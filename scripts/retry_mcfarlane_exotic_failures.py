@@ -56,8 +56,23 @@ def retryable_names(outcome: dict) -> list[str]:
     return sorted(dict.fromkeys(names), key=lambda name: name not in skipped)
 
 
+def shared_certificate_failure(state: dict) -> bool:
+    if state.get('shared_certificate_failure'):
+        return True
+    outcome = state.get('last_monitor_outcome') or {}
+    if outcome.get('shared_failure') == 'certificate_authority_invalid':
+        return True
+    # Recognize an already-saved pre-upgrade full outage without rewriting state.
+    failures = outcome.get('failed_collections') or []
+    return (outcome.get('scope') == 'full' and not outcome.get('complete')
+            and bool(failures) and all('ERR_CERT_AUTHORITY_INVALID' in str(x.get('type', ''))
+                                      for x in failures))
+
+
 def main() -> int:
     state = json.loads(STATE.read_text(encoding="utf-8"))
+    if shared_certificate_failure(state):
+        return 0  # Only a new primary interval probes this shared trust failure.
     outcome = state.get("last_monitor_outcome")
     retry = state.get(RETRY_KEY)
     primary_id = state.get("last_primary_exotic_run_id")
