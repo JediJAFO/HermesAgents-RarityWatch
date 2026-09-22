@@ -59,6 +59,6 @@ Automated refresh fingerprints every manifest source plus stable relevant recurr
 The enabled daily backup remains at 23:40 America/New_York. Offline readiness is not permission to run a monitor, deliver notifications or push. Existing repository history and legacy non-manifest files require separate review; source-only snapshot validation covers the new snapshot, not historical commits.
 
 <!-- automated-drift:start -->
-**Observed implementation fingerprint:** `a0a6aea20d5421f7ccf14948be40d0d139542c3aa0f3261e11b652e227fb1fc0`
+**Observed implementation fingerprint:** `0a14434d501c364037889cca95d2cf161cca578c13957aa6790d783271b22bfb`
 **Automated drift status:** changed or unreviewed; substantive review required. Hash comparison is not a requirements review.
 <!-- automated-drift:end -->

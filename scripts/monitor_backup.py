@@ -70,7 +70,7 @@ def scan(text):
     if any(re.search(p,text) for p in patterns):
         raise ValueError('Snapshot privacy scan failed (value withheld)')
     for host in re.findall(r'https?://([^/\s\"\'<>;,)}]+)',text):
-        if host.rstrip('.') not in {'[::1]:9222','api.coingecko.com','api.rarible.org','mcfarlanetoys.digital'}:
+        if host.rstrip('.') not in {'127.0.0.1:9222','[::1]:9222','api.coingecko.com','api.rarible.org','mcfarlanetoys.digital'}:
             raise ValueError('Non-allowlisted URL in snapshot (value withheld)')
 
 def snapshot(kind, target, docs=DOCS):

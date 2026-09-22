@@ -118,6 +118,15 @@ class BackupTests(unittest.TestCase):
     def test_sensitive_rejection(self):
         for secret in ['0x'+'a'*40, '9'*18, 'ghp_'+'a'*30]:
             with self.assertRaises(ValueError): b.scan(secret)
+
+    def test_only_exact_loopback_cdp_endpoints_are_allowed(self):
+        b.scan("const ipv4 = 'http://127.0.0.1:9222';")
+        b.scan("const ipv6 = 'http://[::1]:9222';")
+        for unsafe in ('http://'+'127.0.0.1:9223', 'http://'+'192.168.1.5:9222',
+                       'http://'+'localhost:9222', 'https://'+'example.com'):
+            with self.subTest(url=unsafe), self.assertRaisesRegex(ValueError, 'Non-allowlisted URL'):
+                b.scan(unsafe)
+
     def test_snapshots_and_missing_dependency(self):
         for kind in ('exotic','sales'):
             with tempfile.TemporaryDirectory() as d:
