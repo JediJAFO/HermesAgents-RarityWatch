@@ -1,13 +1,20 @@
 # Product Requirements Document — McFarlane Exotic Watch
 
-**Version:** 3.0
+**Version:** 4.0
 **Agent source audit:** 2026-09-16; local code and recurring configuration only, no human approval, live collection or delivery test implied.
 **Status:** Active implementation; deployment and delivery caveats below.
 **Private state:** HERMES_HOME/price-watches/mcfarlane-exotics.json (not backed up).
 
 ## Purpose and current scope
 
-Monitor 23 privately configured collections for verified BUY NOW listings with product-page Rarity: Exotic. Bids, purchases, wallet operations and payment UI are excluded. Historical Exotic sales are independent of present availability. The approved roster is private and must be supplied on restore; this document is not a collection inventory.
+Monitor 23 preserved privately configured Exotic watches plus future Exotic or Legendary watches for verified BUY NOW listings with an exact product-page rarity trait. Each watch identity is exact normalized contract plus rarity, so one contract may be monitored independently for both rarities. Bids, purchases, wallet operations and payment UI are excluded. Historical Exotic sales remain independent of present availability. Legendary v1 covers active listings, independent baselines, candidates, alerts and retry state; it does not add Legendary historical-sale enrichment. The approved roster is private and must be supplied on restore; this document is not a collection inventory.
+
+## Zero-LLM collection management
+
+- `scripts/rarity_watch_manager.py` accepts JSON and implements Add, Disable, Remove and List Saved without an agent or model call. Polygon contracts must be exactly `0x` plus 40 hexadecimal characters and rarity must be exactly `Exotic` or `Legendary`.
+- Add owns the shared execution lease, deduplicates exact contract+rarity, resolves exact metadata from the local full MTD catalog before an exact Rarible metadata fallback, then invokes the established validating Playwright collector for only that target. Existing inventory becomes the initial baseline and never generates an onboarding change alert. Add is a live operation; Disable, Remove and List Saved make no marketplace/API/browser call and send no notification.
+- State schema v2 adds `rarity`, `watch_key` and `enabled` to each collection. Legacy records migrate to Exotic while preserving baselines, history, observations and delivery state. Legacy candidate keys migrate to exact watch keys. Disable retains saved history; Remove deletes only the exact watch and its exact pending candidate/retry target references.
+- The unified `plugins/rarity-watch-manager` package provides a persistent Hermes Desktop pane backed by `ctx.rest` and the scoped Python plugin API. It never submits a prompt. The pane visibly labels Add as live and provides Add, Disable, Remove and List Saved controls with an in-pane Result region.
 
 ## Actual runtime and cadence
 
@@ -19,12 +26,12 @@ Monitor 23 privately configured collections for verified BUY NOW listings with p
 
 ## Collection, verification and comparison
 
-- Collection navigation is serial, canonical filtered URLs are checked and BUY NOW cards are verified on token pages for the Exotic trait. Bid-only cards do not become listings. A missing/ambiguous control or loading shell is not proof of an empty collection.
+- Collection navigation is serial, canonical rarity-filtered URLs are checked and BUY NOW cards are verified on token pages for the watch's exact Exotic or Legendary trait. Bid-only cards do not become listings. A missing/ambiguous control or loading shell is not proof of an empty collection.
 - The installed collector uses GAP_MS=10000, a 4-second load settle and two collection attempts. This is an implementation fact, not compliance with the saved operating preference for at least 15 seconds. Closing that pacing mismatch requires a separate runtime change.
 - Batch budget is min(1500, max(600, selected collection count × 60 + 120)) seconds; wrapper allowance adds 120 seconds, with preflight/rate-refresh outside that allowance. Scheduler timeout must allow the entire wrapper.
 - Explicit global blocking evidence stops work. Local failures and budget-skipped collections retain last-known-good rows. Checkpoints preserve verified progress. The collector creates and closes its own page; it does not enumerate or close unrelated tabs. One bounded owned-page reconnect is permitted within the remaining deadline. Replaced-page cleanup is not guaranteed by the inspected recovery branch.
 - Differences are held as candidates until an independent matching observation promotes them. Candidate observations never supply confirmed removals. New token identity or a same-token/same-currency price cut of at least 10% is purchase-priority. Smaller decreases, removals and increases wait for ordinary confirmation.
-- Active seller enrichment uses active order makers and private aliases. Listing set time is separate from collection Activity sale time. Metadata-only, seller-only and valuation changes are not listing-change events.
+- Active seller enrichment uses active order makers and the canonical private `mcfarlane-wallet-aliases.json` database shared with completed-sales and tracked-wallet monitors. Listing set time is separate from collection Activity sale time. Metadata-only, seller-only and valuation changes are not listing-change events. The saved-state-only recurring-wallet audit compares distinct listing/sale/activity occurrences against that shared alias database without marketplace or notification calls.
 
 ## Reliability and recovery
 
@@ -50,7 +57,7 @@ Monitor 23 privately configured collections for verified BUY NOW listings with p
 
 ## Backup, restore and verification boundary
 
-The explicit monitor_backup_manifest.json includes the Python wrapper, Node collector and dynamically required WhatsApp policy, shared lease, technical retries, priority confirmation, spot-rate refresh, missing-history worker, alias resolver code, owed-heartbeat helper and backup/PRD utilities. Only code and these PRDs enter the source snapshot. No live state, raw aliases, wallets, private URLs, destinations, credentials, logs or browser profiles are copied. Python/Node packages are declared dependencies, not bundled binaries.
+The explicit monitor_backup_manifest.json includes the Python wrapper, Node collector and dynamically required WhatsApp policy, shared lease, rarity manager CLI/API/Desktop plugin and their offline tests, technical retries, priority confirmation, spot-rate refresh, missing-history worker, alias resolver code, owed-heartbeat helper and backup/PRD utilities. Only code and these PRDs enter the source snapshot. No live state, raw aliases, wallets, private URLs, destinations, credentials, logs or browser profiles are copied. Python/Node packages are declared dependencies, not bundled binaries.
 
 RESTORE.md and restore-config.json describe relocation placeholders, required private configuration, disabled schedule templates, browser/Node installation and controlled rebaseline. This is not a complete stateful disaster-recovery backup: previous dedupe, pending delivery, exact roster and history require separate private recovery. Legacy repository data/history is not retroactively sanitized.
 
@@ -59,6 +66,6 @@ Automated refresh fingerprints every manifest source plus stable relevant recurr
 The enabled daily backup remains at 23:40 America/New_York. Offline readiness is not permission to run a monitor, deliver notifications or push. Existing repository history and legacy non-manifest files require separate review; source-only snapshot validation covers the new snapshot, not historical commits.
 
 <!-- automated-drift:start -->
-**Observed implementation fingerprint:** `0a14434d501c364037889cca95d2cf161cca578c13957aa6790d783271b22bfb`
+**Observed implementation fingerprint:** `16072383a3eda24c41ce02bc224b8b34aea7871600259d17037562a0b9e3166b`
 **Automated drift status:** changed or unreviewed; substantive review required. Hash comparison is not a requirements review.
 <!-- automated-drift:end -->

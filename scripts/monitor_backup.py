@@ -22,8 +22,10 @@ def manifest():
 
 def source_paths(kind, home=HOME):
     spec = manifest()
-    return [home / group / name for group in ('scripts', 'price-watches')
-            for name in spec[kind][group]] + [home / 'scripts' / name for name in spec['shared_scripts']]
+    grouped = [home / group / name for group in ('scripts', 'price-watches')
+               for name in spec[kind].get(group, [])]
+    rooted = [home / name for name in spec[kind].get('root_paths', [])]
+    return grouped + rooted + [home / 'scripts' / name for name in spec['shared_scripts']]
 
 def schedules(kind, jobs=None):
     if jobs is None:

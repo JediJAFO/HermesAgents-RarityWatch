@@ -1,0 +1,4 @@
+name: rarity-watch-manager
+version: "1.0.0"
+description: "Deterministic zero-LLM Exotic/Legendary watch collection manager backend."
+author: "Local Hermes user"

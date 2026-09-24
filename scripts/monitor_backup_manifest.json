@@ -1,16 +1,17 @@
 {
   "schema_version": 2,
   "snapshot_policy": "Explicit source-only allowlists; no live state, original job IDs, credentials, wallets, destinations, browser profiles or environments. Restore requires private inputs; all schedule templates are disabled.",
-  "external_dependencies": {"python": ["python-docx", "psutil", "tzdata"], "node": ["playwright"], "deployment": ["Hermes scheduler", "dedicated Chrome CDP", "Git for scheduled backups"]},
+  "external_dependencies": {"python": ["python-docx", "psutil", "tzdata", "fastapi (provided by Hermes)"], "node": ["playwright"], "deployment": ["Hermes scheduler", "Hermes Desktop plugin backend", "dedicated Chrome CDP", "Git for scheduled backups"]},
   "exotic": {
     "prd": "McFarlane_Exotic_Watch_PRD",
-    "scripts": ["run_mcfarlane_exotic_deterministic.py", "exotic_execution_lock.py", "retry_mcfarlane_exotic_failures.py", "confirm_priority_exotic_listing_candidates.py", "refresh_exotic_current_pol_usd.py", "enrich_exotic_last_sales.py", "deliver_exotic_owed_heartbeat.py", "run_mcfarlane_exotic_whatsapp.py", "run-mcfarlane-exotic-whatsapp.js", "backup-exotic-watch.py"],
-    "price-watches": ["run_mcfarlane_exotic_deterministic.js", "exotic_whatsapp_policy.js", "mcfarlane_wallet_aliases.py"]
+    "scripts": ["run_mcfarlane_exotic_deterministic.py", "exotic_execution_lock.py", "rarity_watch_manager.py", "test_rarity_watch_manager.py", "test_rarity_watch_plugin_api.py", "retry_mcfarlane_exotic_failures.py", "confirm_priority_exotic_listing_candidates.py", "refresh_exotic_current_pol_usd.py", "enrich_exotic_last_sales.py", "deliver_exotic_owed_heartbeat.py", "run_mcfarlane_exotic_whatsapp.py", "run-mcfarlane-exotic-whatsapp.js", "backup-exotic-watch.py"],
+    "price-watches": ["run_mcfarlane_exotic_deterministic.js", "test_rarity_collector.js", "exotic_whatsapp_policy.js", "mcfarlane_wallet_aliases.py"],
+    "root_paths": ["plugins/rarity-watch-manager/plugin.yaml", "plugins/rarity-watch-manager/__init__.py", "plugins/rarity-watch-manager/dashboard/manifest.json", "plugins/rarity-watch-manager/dashboard/plugin_api.py", "plugins/rarity-watch-manager/desktop/plugin.js"]
   },
   "sales": {
     "prd": "McFarlane_DC_Sales_Alerts_PRD",
     "scripts": ["run_mtd_sales_monitor.py", "retry_mtd_http400.py", "send_mtd_whatsapp_sales_only.py", "send_mtd_8am_last_five_heartbeat.py", "enrich_mtd_dc_metadata.py", "backup-mtd-sales-alerts.py"],
     "price-watches": ["run_mcfarlane_dc_sales.py"]
   },
-  "shared_scripts": ["monitor_backup.py", "monitor_backup_manifest.json", "refresh-mcfarlane-prds.py", "test_monitor_backup.py"]
+  "shared_scripts": ["monitor_backup.py", "monitor_backup_manifest.json", "refresh-mcfarlane-prds.py", "test_monitor_backup.py", "audit_mtd_wallet_aliases.py", "test_audit_mtd_wallet_aliases.py", "report_mtd_wallet_alias_audit.py", "test_report_mtd_wallet_alias_audit.py"]
 }

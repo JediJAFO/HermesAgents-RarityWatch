@@ -138,6 +138,13 @@ class BackupTests(unittest.TestCase):
                 saved=dep.read_bytes(); dep.unlink()
                 with self.assertRaisesRegex(ValueError,'Missing or changed'): b.verify(root)
                 dep.write_bytes(saved); self.assertEqual(count,b.verify(root))
+    def test_rarity_manager_sources_are_in_exotic_backup(self):
+        relative={p.relative_to(b.HOME).as_posix() for p in b.source_paths('exotic')}
+        self.assertIn('scripts/rarity_watch_manager.py',relative)
+        self.assertIn('price-watches/test_rarity_collector.js',relative)
+        self.assertIn('plugins/rarity-watch-manager/desktop/plugin.js',relative)
+        self.assertIn('plugins/rarity-watch-manager/dashboard/plugin_api.py',relative)
+
     def test_local_import_closure(self):
         # Resolve imports against actual sibling source modules without importing
         # runtime modules (several execute state/network work at import time).

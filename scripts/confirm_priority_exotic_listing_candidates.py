@@ -68,18 +68,23 @@ def is_priority_listing_candidate(collection: dict, fingerprint: str) -> bool:
 def main() -> int:
     state = json.loads(STATE.read_text(encoding="utf-8"))
     candidates = state.get("pending_exotic_change_candidates") or {}
-    priority = [
-        collection["name"]
-        for collection in state.get("collections") or []
-        if collection.get("name") in candidates
-        and is_priority_listing_candidate(collection, candidates[collection["name"]])
-    ]
+    priority = []
+    priority_keys = []
+    for collection in state.get("collections") or []:
+        identity = collection.get("watch_key") or collection.get("name")
+        if identity in candidates and is_priority_listing_candidate(collection, candidates[identity]):
+            priority.append(collection.get("name"))
+            if collection.get("watch_key"):
+                priority_keys.append(collection["watch_key"])
     if not priority:
         # Empty stdout intentionally produces no delivery from this no-agent job.
         return 0
     environment = os.environ.copy()
     environment["MCFARLANE_RUN_KIND"] = "confirmation"
-    environment["MCFARLANE_COLLECTION_NAMES"] = "|".join(priority)
+    if len(priority_keys) == len(priority):
+        environment["MCFARLANE_WATCH_KEYS"] = "|,|".join(priority_keys)
+    else:
+        environment["MCFARLANE_COLLECTION_NAMES"] = "|".join(priority)
     result = subprocess.run([sys.executable, str(COLLECTOR)], env=environment, check=False)
     return result.returncode
 

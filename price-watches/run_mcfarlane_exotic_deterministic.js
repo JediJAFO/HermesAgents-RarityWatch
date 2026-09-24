@@ -23,6 +23,39 @@ function executionBudget(selectedCount) {
 const ET = new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+function watchKey(collection) {
+  const rarity = collection.rarity || 'Exotic';
+  return `${String(collection.contract || '').toLowerCase()}|${rarity}`;
+}
+function migrateWatchState(raw) {
+  const collections = (raw.collections || []).map(original => {
+    const item = {...original};
+    item.contract = String(item.contract || '').toLowerCase();
+    item.rarity = item.rarity || 'Exotic';
+    if (item.enabled === undefined) item.enabled = true;
+    item.watch_key = watchKey(item);
+    return item;
+  });
+  const legacyCandidates = raw.pending_exotic_change_candidates || {};
+  const candidates = {};
+  for (const [identity, fingerprint] of Object.entries(legacyCandidates)) {
+    if (identity.includes('|')) { candidates[identity] = fingerprint; continue; }
+    const matches = collections.filter(c => c.name === identity);
+    const target = matches.find(c => c.rarity === 'Exotic') || (matches.length === 1 ? matches[0] : null);
+    candidates[target ? target.watch_key : identity] = fingerprint;
+  }
+  return {
+    ...raw,
+    schema_version: Math.max(2, Number(raw.schema_version || 1)),
+    collections,
+    pending_exotic_change_candidates: candidates
+  };
+}
+function rarityLabel(collection) { return `[${collection.rarity || 'Exotic'}]`; }
+function hasExactRarityTrait(text, rarity) {
+  const escaped = String(rarity).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`\\bRarity\\s*(?:\\n|\\s)+${escaped}\\b`, 'i').test(String(text || ''));
+}
 const now = () => {
   const instant = new Date();
   const p = Object.fromEntries(ET.formatToParts(instant).filter(x => x.type !== 'literal').map(x => [x.type, x.value]));
@@ -162,7 +195,7 @@ async function extractObservation(page, collection) {
   }
   return { kind: 'VERIFIED', baseline: { for_sale: listings.length > 0, listing_count: listings.length, listings }, actual_url: actualUrl };
 }
-async function verifyExoticTraits(page, listings, deadlineAt) {
+async function verifyRarityTraits(page, listings, deadlineAt, rarity) {
   const active = [];
   for (const listing of listings) {
     if (Date.now() + GAP_MS + 30000 > deadlineAt) return { ok: false, reason: 'batch time budget reached before product rarity verification' };
@@ -177,7 +210,7 @@ async function verifyExoticTraits(page, listings, deadlineAt) {
       if (!sameFilteredUrl(page.url(), listing.url)) return { ok: false, reason: `unexpected product URL for token ${listing.token_id}` };
       const productText = productTextBeforeRecommendations(text);
       if (/\bOPEN FOR BIDS\b/i.test(productText)) continue;
-      if (!/\bRarity\s*(?:\n|\s)+Exotic\b/i.test(productText)) return { ok: false, reason: `product trait did not verify Exotic for token ${listing.token_id}` };
+      if (!hasExactRarityTrait(productText, rarity)) return { ok: false, reason: `product trait did not verify ${rarity} for token ${listing.token_id}` };
       const livePrice = buyNowPriceFromProduct(productText);
       if (!livePrice) return { ok: false, reason: `product page did not expose a live BUY NOW price for token ${listing.token_id}` };
       listing.price = livePrice.price;
@@ -235,7 +268,7 @@ async function observeWithRetries(page, collection, waitBeforeNav, deadlineAt, r
       result.attempts = attempt;
       if (result.kind === 'GLOBAL_BLOCK') return result;
       if (result.kind === 'VERIFIED') {
-        const traits = await verifyExoticTraits(page, result.baseline.listings, deadlineAt);
+        const traits = await verifyRarityTraits(page, result.baseline.listings, deadlineAt, collection.rarity || 'Exotic');
         if (traits.global) return { kind: 'GLOBAL_BLOCK', reason: traits.reason, attempts: attempt };
         if (traits.ok) {
           result.baseline.listing_count = result.baseline.listings.length;
@@ -379,7 +412,7 @@ function heartbeatReport(state, outcome = {}) {
       const wallet = String(listing.seller_wallet || '').trim();
       const sellerLabel = seller && !/0x[0-9a-f]{40}/i.test(seller)
         ? seller : (wallet ? `...${wallet.slice(-4)}` : 'Seller not recorded');
-      lines.push(`• ${aliases.get(c.name)} — ${price}${usdMissing ? ' (USD unavailable)' : ''} — ${sellerLabel}`);
+      lines.push(`• ${rarityLabel(c)} ${aliases.get(c.name)} — ${price}${usdMissing ? ' (USD unavailable)' : ''} — ${sellerLabel}`);
     }
   }
   if (!lines.some(x => x.startsWith('•'))) lines.push('No active listings in saved verified state.');
@@ -394,22 +427,23 @@ function report(state, outcome) {
     return (outcome.discord_changes || []).length
       ? heartbeat + '\r\n' + report(state, {...outcome, daily_heartbeat_date:null}) : heartbeat;
   }
-  const changedNames = new Set((outcome.discord_changes || []).map(x => x.name));
+  const changedKeys = new Set((outcome.discord_changes || []).map(x => x.watch_key || `${x.contract || ''}|${x.rarity || 'Exotic'}`));
   const lines = [];
   if (outcome.failed_collections.length) {
-    lines.push(`Partial check — ${outcome.failed_collections.map(x => `**${x.name}** (${x.type})`).join('; ')}. Last-known-good rows were retained.`);
+    lines.push(`Partial check — ${outcome.failed_collections.map(x => `**[${x.rarity || 'Exotic'}] ${x.name}** (${x.type})`).join('; ')}. Last-known-good rows were retained.`);
     lines.push('');
   }
-  lines.push(changedNames.size ? 'Changes detected —' : (outcome.complete === false ? '**McFarlane Exotic Watch — no confirmed changes**' : '**McFarlane Exotic Watch — no changes**'));
+  lines.push(changedKeys.size ? 'Changes detected —' : (outcome.complete === false ? '**McFarlane Rarity Watch — no confirmed changes**' : '**McFarlane Rarity Watch — no changes**'));
   lines.push(`Last complete check: ${state.last_successful_monitor_run || '—'}`);
   lines.push('');
-  const rows = state.collections.filter(c => c.baseline && changedNames.has(c.name));
+  const rows = state.collections.filter(c => c.baseline && changedKeys.has(c.watch_key || watchKey(c)));
   for (const c of rows) {
     const b = c.baseline;
-    const removed = (outcome.discord_changes || []).filter(x => x.name === c.name).flatMap(x => x.removed_listings || []);
-    const removalText = removed.length ? ` Removed ${removed.length} Exotic listing(s) (previously ${removed.map(x => `${listingPriceText(x, state)} by ${sellerText(x)}`).join(', ')}).` : '';
-    if (b.for_sale) lines.push(`• **${c.name}** — **🟢 YES**; ${b.listing_count} listing(s); **${listingDetails(c, state)}**; last: ${saleText(c)}; [View](<${c.source_url}>)${removalText}`);
-    else lines.push(`• **${c.name}** — No; 0 listing(s); —; last: ${saleText(c)}${removalText}`);
+    const removed = (outcome.discord_changes || []).filter(x => (x.watch_key || watchKey(x)) === (c.watch_key || watchKey(c))).flatMap(x => x.removed_listings || []);
+    const removalText = removed.length ? ` Removed ${removed.length} ${c.rarity} listing(s) (previously ${removed.map(x => `${listingPriceText(x, state)} by ${sellerText(x)}`).join(', ')}).` : '';
+    const history = c.rarity === 'Exotic' ? `; last: ${saleText(c)}` : '';
+    if (b.for_sale) lines.push(`• **${rarityLabel(c)} ${c.name}** — **🟢 YES**; ${b.listing_count} listing(s); **${listingDetails(c, state)}**${history}; [View](<${c.source_url}>)${removalText}`);
+    else lines.push(`• **${rarityLabel(c)} ${c.name}** — No; 0 listing(s); —${history}${removalText}`);
   }
   return lines.join('\r\n') + '\r\n';
 }
@@ -445,7 +479,7 @@ function recordPartialDeliveryPolicy(state, outcome) {
   // never reconstruct removals from a held candidate or a boolean change flag.
   const queued = Array.isArray(state.pending_discord_listing_changes) ? state.pending_discord_listing_changes : [];
   outcome.discord_changes = [...queued, ...(outcome.discord_changes || [])]
-    .filter(event => state.collections.some(c => c.name === event.name && c.baseline));
+    .filter(event => state.collections.some(c => (c.watch_key || watchKey(c)) === (event.watch_key || watchKey(event)) && c.baseline));
   const deliver = outcome.scope === 'full' || outcome.complete;
   if (deliver) delete state.pending_discord_listing_changes;
   else if (outcome.discord_changes.length) state.pending_discord_listing_changes = outcome.discord_changes;
@@ -481,13 +515,14 @@ function acquireExecutionLock(lockPath = path.join(ROOT, '.exotic-execution-lock
   // Do not time-expire another process's lease. Hard kills deliberately fail closed.
   return () => { fs.unlinkSync(path.join(lockPath, 'owner.json')); fs.rmdirSync(lockPath); };
 }
-function selectCollections(state) {
-  const requestedNames = new Set((process.env.MCFARLANE_COLLECTION_NAMES || '').split('|').map(x => x.trim()).filter(Boolean));
-  const limit = Math.min(state.collections.length, Number(process.env.MCFARLANE_LIMIT || state.collections.length));
-  const selected = requestedNames.size
-    ? state.collections.filter(c => requestedNames.has(c.name))
-    : state.collections.slice(0, limit);
-  if (process.env.MCFARLANE_RUN_KIND === 'retry') {
+function selectCollections(state, env = process.env) {
+  const active = state.collections.filter(c => c.enabled !== false);
+  const requestedKeys = new Set((env.MCFARLANE_WATCH_KEYS || '').split('|,|').map(x => x.trim()).filter(Boolean));
+  const requestedNames = new Set((env.MCFARLANE_COLLECTION_NAMES || '').split('|').map(x => x.trim()).filter(Boolean));
+  const limit = Math.min(active.length, Number(env.MCFARLANE_LIMIT || active.length));
+  const selected = requestedKeys.size ? active.filter(c => requestedKeys.has(c.watch_key || watchKey(c)))
+    : requestedNames.size ? active.filter(c => requestedNames.has(c.name)) : active.slice(0, limit);
+  if (env.MCFARLANE_RUN_KIND === 'retry') {
     const skipped = new Set((state.last_monitor_outcome?.failed_collections || [])
       .filter(x => String(x.type || '').includes('batch time budget reached before collection check')).map(x => x.name));
     selected.sort((a, b) => Number(skipped.has(b.name)) - Number(skipped.has(a.name)));
@@ -509,6 +544,26 @@ async function main() {
   const release = acquireExecutionLock();
   if (!release) { process.exitCode = 75; return; }
   try {
+    if (process.argv?.includes('--observe-onboarding-entry')) {
+      const entry = migrateWatchState({collections:[JSON.parse(process.env.MCFARLANE_ONBOARD_ENTRY || '{}')]}).collections[0];
+      if (!/^0x[0-9a-f]{40}$/.test(entry.contract) || !['Exotic','Legendary'].includes(entry.rarity)) throw new Error('invalid onboarding entry');
+      let browser, page;
+      try {
+        browser = await chromium.connectOverCDP(CDP, {timeout:20000});
+        page = await browser.contexts()[0].newPage();
+        page.setDefaultTimeout(10000);
+        const deadlineAt = Date.now() + executionBudget(1).batch_ms;
+        const preflight = await certificatePreflight(page);
+        if (preflight.kind !== 'VERIFIED') { process.stdout.write(JSON.stringify({kind:'UNAVAILABLE',reason:preflight.reason || 'certificate preflight unavailable'})); return; }
+        await sleep(GAP_MS);
+        const observation = await observeWithRetries(page, entry, () => false, deadlineAt);
+        process.stdout.write(JSON.stringify({...observation, observed_at:now()}));
+      } finally {
+        if (page) await page.close().catch(() => {});
+        if (browser) await browser.close().catch(() => {});
+      }
+      return;
+    }
     if (process.argv?.includes('--arm-scheduled-heartbeat')) {
       const state = JSON.parse(fs.readFileSync(STATE, 'utf8'));
       armDailyHeartbeat(state, {scope:'full',at:now()});
@@ -531,21 +586,24 @@ async function main() {
   } finally { release(); }
 }
 async function collectMain() {
-  const state = JSON.parse(fs.readFileSync(STATE, 'utf8'));
+  const rawState = JSON.parse(fs.readFileSync(STATE, 'utf8'));
+  const state = migrateWatchState(rawState);
+  if (canonical(rawState) !== canonical(state)) atomicJson(STATE, state);
   const run = { at: now(), collector: 'deterministic-playwright-cdp-v1', results: [], global_stop: false };
   let browser, page, lastNavigation = false;
   const requestedNames = new Set((process.env.MCFARLANE_COLLECTION_NAMES || '').split('|').map(x => x.trim()).filter(Boolean));
+  const requestedKeys = new Set((process.env.MCFARLANE_WATCH_KEYS || '').split('|,|').map(x => x.trim()).filter(Boolean));
   const selectedCollections = selectCollections(state);
   const BATCH_DEADLINE_MS = executionBudget(selectedCollections.length).batch_ms;
   run.batch_budget_ms = BATCH_DEADLINE_MS;
-  run.scope = !requestedNames.size && !process.env.MCFARLANE_RUN_KIND && selectedCollections.length === state.collections.length ? 'full' : 'targeted';
+  run.scope = !requestedNames.size && !requestedKeys.size && !process.env.MCFARLANE_RUN_KIND && selectedCollections.length === state.collections.filter(c => c.enabled !== false).length ? 'full' : 'targeted';
   if (run.scope === 'full') state.last_primary_exotic_run_id = require('crypto').randomUUID();
   armDailyHeartbeat(state, run);
   // Persist debt before CDP/startup: a thrown connection cannot erase the 8AM occurrence.
   atomicJson(STATE, state);
-  const selectedNames = new Set(selectedCollections.map(c => c.name));
+  const selectedKeys = new Set(selectedCollections.map(c => c.watch_key || watchKey(c)));
   const outstanding = run.scope === 'targeted'
-    ? (state.last_monitor_outcome?.failed_collections || []).filter(x => !selectedNames.has(x.name)) : [];
+    ? (state.last_monitor_outcome?.failed_collections || []).filter(x => !selectedKeys.has(x.watch_key || watchKey(x))) : [];
   try {
     browser = await chromium.connectOverCDP(CDP, { timeout: 20000 });
     const context = browser.contexts()[0];
@@ -570,17 +628,17 @@ async function collectMain() {
       run.shared_failure = 'certificate_authority_invalid';
       run.global_stop = true;
       run.global_reason = run.preflight.reason;
-      run.results = selectedCollections.map(c => ({name:c.name, kind:'UNAVAILABLE', reason:run.global_reason, attempts:0}));
+      run.results = selectedCollections.map(c => ({name:c.name, contract:c.contract, rarity:c.rarity, watch_key:c.watch_key, kind:'UNAVAILABLE', reason:run.global_reason, attempts:0}));
     }
     for (const collection of run.global_stop ? [] : selectedCollections) {
       if (Date.now() - startedAt > BATCH_DEADLINE_MS) {
         run.timed_out = true;
-        run.results.push({ name: collection.name, kind: 'UNAVAILABLE', reason: 'batch time budget reached before collection check' });
+        run.results.push({ name: collection.name, contract:collection.contract, rarity:collection.rarity, watch_key:collection.watch_key, kind: 'UNAVAILABLE', reason: 'batch time budget reached before collection check' });
         continue;
       }
       const result = await observeWithRetries(page, collection, () => lastNavigation, deadlineAt, recoverPage);
       lastNavigation = true;
-      run.results.push({ name: collection.name, ...result });
+      run.results.push({ name: collection.name, contract:collection.contract, rarity:collection.rarity, watch_key:collection.watch_key, ...result });
       // Persist progress so an interrupted diagnostic has useful evidence.
       atomicJson(RUN, run);
       if (result.kind === 'GLOBAL_BLOCK') { run.global_stop = true; run.global_reason = result.reason; break; }
@@ -594,7 +652,7 @@ async function collectMain() {
   atomicJson(RUN, run);
   if (run.global_stop || run.fatal_error || run.results.length !== selectedCollections.length) {
     const reason = run.global_reason || run.fatal_error || 'incomplete deterministic result set';
-    const outcome = { at: run.at, complete: false, changed: false, scope: run.scope, failed_collections: [...outstanding, ...selectedCollections.map(c => ({ name: c.name, type: reason }))] };
+    const outcome = { at: run.at, complete: false, changed: false, scope: run.scope, failed_collections: [...outstanding, ...selectedCollections.map(c => ({ name: c.name, contract:c.contract, rarity:c.rarity, watch_key:c.watch_key, type: reason }))] };
     if (run.shared_failure) {
       outcome.shared_failure = run.shared_failure;
       state.shared_certificate_failure = {code:run.shared_failure, at:run.at, detail:reason};
@@ -613,9 +671,10 @@ async function collectMain() {
   const failures = [...outstanding], changed = [], discordChanges = [], whatsappChanges = [];
   const candidates = state.pending_exotic_change_candidates || {};
   for (const collection of state.collections) {
-    const result = run.results.find(x => x.name === collection.name);
+    const key = collection.watch_key || watchKey(collection);
+    const result = run.results.find(x => (x.watch_key || watchKey(x)) === key);
     if (!result) continue;
-    if (result.kind !== 'VERIFIED') { failures.push({ name: collection.name, type: result.reason || 'local failure' }); continue; }
+    if (result.kind !== 'VERIFIED') { failures.push({ name: collection.name, contract:collection.contract, rarity:collection.rarity, watch_key:key, type: result.reason || 'local failure' }); continue; }
     const prior = collection.baseline || { for_sale: false, listing_count: 0, listings: [] };
     const stableBaseline = stabilizeListingNames(prior, result.baseline);
     // First observation is onboarding, not a change from invented zero inventory.
@@ -624,7 +683,7 @@ async function collectMain() {
       collection.baseline_status = 'verified';
       collection.last_successful_observation = run.at;
       delete collection.onboarding_failure;
-      delete candidates[collection.name];
+      delete candidates[key];
       continue;
     }
     const candidateFingerprint = canonical(comparableBaseline(stableBaseline));
@@ -632,22 +691,22 @@ async function collectMain() {
       // Promote a change only after the same normalized observation appears in
       // two independent interval runs. This avoids an extra slow browser pass
       // and makes a transient card/render defect incapable of alerting.
-      if (candidates[collection.name] === candidateFingerprint) {
-        changed.push(collection.name);
-        whatsappChanges.push(...whatsappPolicy.confirmedEvents(collection.name, prior, stableBaseline, run.at));
+      if (candidates[key] === candidateFingerprint) {
+        changed.push(key);
+        whatsappChanges.push(...whatsappPolicy.confirmedEvents(`${rarityLabel(collection)} ${collection.name}`, prior, stableBaseline, run.at));
         const currentTokens = new Set(stableBaseline.listings.map(x => String(x.token_id)));
-        discordChanges.push({ name: collection.name, at: run.at,
+        discordChanges.push({ name: collection.name, contract:collection.contract, rarity:collection.rarity, watch_key:key, at: run.at,
           removed_listings: (prior.listings || []).filter(x => !currentTokens.has(String(x.token_id))) });
         collection.baseline = stableBaseline;
         collection.last_successful_observation = run.at;
-        delete candidates[collection.name];
+        delete candidates[key];
       } else {
-        candidates[collection.name] = candidateFingerprint;
-        failures.push({ name: collection.name, type: 'candidate listing change held for next-interval confirmation' });
+        candidates[key] = candidateFingerprint;
+        failures.push({ name: collection.name, contract:collection.contract, rarity:collection.rarity, watch_key:key, type: 'candidate listing change held for next-interval confirmation' });
       }
       continue;
     }
-    delete candidates[collection.name];
+    delete candidates[key];
     // Seller enrichment is display data, not an alert-worthy listing change.
     collection.baseline = stableBaseline;
     collection.last_successful_observation = run.at;
@@ -658,7 +717,7 @@ async function collectMain() {
   const deliver = recordPartialDeliveryPolicy(state, outcome);
   if (outcome.complete && run.scope === 'full') state.last_successful_monitor_run = run.at;
   if (changed.length) {
-    const fingerprint = canonical(state.collections.map(c => [c.name, c.baseline]));
+    const fingerprint = canonical(state.collections.map(c => [c.watch_key || watchKey(c), c.baseline]));
     state.last_alert_fingerprint = fingerprint;
   }
   whatsappPolicy.enqueue(state, whatsappChanges, run.at);
@@ -667,4 +726,5 @@ async function collectMain() {
   atomicText(path.join(ROOT, 'mcfarlane-discord-deterministic-status.md'), text);
   if (deliver) process.stdout.write(text);
 }
-main().catch(error => { console.error(`Deterministic monitor fatal error: ${error.stack || error}`); process.exitCode = 1; });
+if (typeof require !== 'undefined' && typeof module !== 'undefined' && require.main === module) main().catch(error => { console.error(`Deterministic monitor fatal error: ${error.stack || error}`); process.exitCode = 1; });
+if (typeof module !== 'undefined') module.exports = {migrateWatchState, watchKey, selectCollections, hasExactRarityTrait, report};

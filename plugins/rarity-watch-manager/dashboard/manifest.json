@@ -1,0 +1,7 @@
+{
+  "name": "rarity-watch-manager",
+  "label": "Rarity Watch Manager",
+  "description": "Zero-LLM Exotic/Legendary watch management.",
+  "version": "1.0.0",
+  "api": "plugin_api.py"
+}

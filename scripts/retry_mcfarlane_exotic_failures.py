@@ -56,6 +56,20 @@ def retryable_names(outcome: dict) -> list[str]:
     return sorted(dict.fromkeys(names), key=lambda name: name not in skipped)
 
 
+def retryable_keys(outcome: dict) -> list[str]:
+    keys: list[str] = []
+    skipped: set[str] = set()
+    for failure in outcome.get("failed_collections") or []:
+        if not isinstance(failure, dict):
+            continue
+        key, reason = failure.get("watch_key"), str(failure.get("type") or "")
+        if isinstance(key, str) and key and CANDIDATE_MARKER not in reason:
+            keys.append(key)
+            if 'batch time budget reached before collection check' in reason:
+                skipped.add(key)
+    return sorted(dict.fromkeys(keys), key=lambda key: key not in skipped)
+
+
 def shared_certificate_failure(state: dict) -> bool:
     if state.get('shared_certificate_failure'):
         return True
@@ -83,6 +97,7 @@ def main() -> int:
         if state.pop(RETRY_KEY, None) is not None:
             atomic_write(state)
         return 0
+    keys = retryable_keys(outcome)
     names = retryable_names(outcome)
     if not names:
         # A targeted/manual recovery may have cleared the technical failures
@@ -102,6 +117,7 @@ def main() -> int:
             "primary_run_id": primary_id,
             "outcome_at": outcome.get("at"),
             "names": names,
+            "keys": keys,
             "attempts_started": 0,
             "next_retry_at": iso(now + timedelta(minutes=DELAYS_MINUTES[0])),
         }
@@ -114,7 +130,10 @@ def main() -> int:
     environment = os.environ.copy()
     environment["MCFARLANE_RUN_KIND"] = "retry"
     # Re-evaluate unresolved work: another targeted pass may have changed it.
-    environment["MCFARLANE_COLLECTION_NAMES"] = "|".join(names)
+    if keys:
+        environment["MCFARLANE_WATCH_KEYS"] = "|,|".join(keys)
+    else:
+        environment["MCFARLANE_COLLECTION_NAMES"] = "|".join(names)
     result = subprocess.run([sys.executable, str(COLLECTOR)], env=environment, check=False)
     if result.returncode == BUSY:
         return BUSY
@@ -123,6 +142,7 @@ def main() -> int:
     updated = json.loads(STATE.read_text(encoding="utf-8"))
     updated_outcome = updated.get("last_monitor_outcome")
     next_names = retryable_names(updated_outcome) if isinstance(updated_outcome, dict) and not updated_outcome.get("complete") else []
+    next_keys = retryable_keys(updated_outcome) if isinstance(updated_outcome, dict) and not updated_outcome.get("complete") else []
     used = attempts + 1
     if not next_names:
         updated.pop(RETRY_KEY, None)
@@ -131,6 +151,7 @@ def main() -> int:
             "primary_run_id": primary_id,
             "outcome_at": updated_outcome.get("at"),
             "names": next_names,
+            "keys": next_keys,
             "attempts_started": used,
             "next_retry_at": iso(utc_now() + timedelta(minutes=DELAYS_MINUTES[used])) if used < len(DELAYS_MINUTES) else None,
             "exhausted": used >= len(DELAYS_MINUTES),
