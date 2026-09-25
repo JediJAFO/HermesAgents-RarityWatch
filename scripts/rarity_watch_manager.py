@@ -5,14 +5,17 @@ Every operation is local Python/Node code. No LLM or agent turn is involved.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import tempfile
+from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.request import Request, urlopen
+import uuid
 
 HOME = Path(__file__).resolve().parents[1]
 STATE = HOME / "price-watches" / "mcfarlane-exotics.json"
@@ -135,9 +138,58 @@ def _saved_list(state: dict[str, Any]) -> dict[str, Any]:
             "network_calls": 0, "notifications": 0}
 
 
+def _seller_label(listing: dict[str, Any]) -> str:
+    tag = str(listing.get("seller_name_tag") or "").strip()
+    if tag and not re.fullmatch(r"0x[0-9a-fA-F]{40}", tag):
+        return tag
+    wallet = str(listing.get("seller_wallet") or "").strip()
+    return "..." + wallet[-4:] if wallet else "Seller not recorded"
+
+
+def _price_label(listing: dict[str, Any], state: dict[str, Any]) -> str:
+    value = listing.get("price")
+    try:
+        number = float(value)
+        amount = f"{number:,.0f}" if number.is_integer() else f"{number:,.8f}".rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        amount = str(value or "price unavailable")
+        number = None
+    currency = "POL" if listing.get("currency") in {"POLYGON", "MATIC", "POL"} else str(listing.get("currency") or "")
+    rate = (state.get("current_pol_usd") or {}).get("rate")
+    try:
+        usd = f" (${number * float(rate):,.2f})" if number is not None and currency == "POL" and float(rate) > 0 else ""
+    except (TypeError, ValueError):
+        usd = ""
+    return f"{amount} {currency}{usd}".strip()
+
+
+def _onboarding_report(entry: dict[str, Any], state: dict[str, Any]) -> str:
+    rarity, name = entry["rarity"], entry["name"]
+    baseline = entry["baseline"]
+    listings = baseline.get("listings") or []
+    lines = [f"**Rarity watch added — [{rarity}] {name}**"]
+    if not baseline.get("for_sale") or not listings:
+        lines.append(f"No active [{rarity}] BUY NOW listings verified.")
+    else:
+        count = len(listings)
+        lines.append(f"{count} active BUY NOW listing{'s' if count != 1 else ''} verified:")
+        lines.extend(f"• {_price_label(item, state)} — {_seller_label(item)}" for item in listings)
+    lines.append("Included in subsequent interval checks and the 8AM ET heartbeat.")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def _default_notice_deliverer(text: str, batch_id: str) -> list[str]:
+    module_path = HOME / "price-watches" / "rarity_watch_discord_delivery.py"
+    spec = importlib.util.spec_from_file_location("rarity_watch_discord_delivery", module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.Discord().deliver(text, batch_id)
+
+
 def execute(request: dict[str, Any], *, state_path: Path = STATE, lock_path: Path = LOCK,
             metadata_resolver: Callable[[str], dict[str, Any]] | None = None,
-            baseline_runner: Callable[[dict[str, Any]], dict[str, Any]] | None = None) -> dict[str, Any]:
+            baseline_runner: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+            notice_deliverer: Callable[[str, str], list[str]] | None = None) -> dict[str, Any]:
     action = request.get("action")
     if action == "list":
         return _saved_list(migrated_state(json.loads(Path(state_path).read_text(encoding="utf-8"))))
@@ -147,6 +199,8 @@ def execute(request: dict[str, Any], *, state_path: Path = STATE, lock_path: Pat
     key = watch_key(contract, rarity)
     metadata_resolver = metadata_resolver or _default_metadata
     baseline_runner = baseline_runner or _default_baseline
+    notice_deliverer = notice_deliverer or _default_notice_deliverer
+    notice = None
     with _lock_context(Path(lock_path)) as acquired:
         if not acquired:
             raise RuntimeError("rarity watch is busy; no state changed")
@@ -173,34 +227,69 @@ def execute(request: dict[str, Any], *, state_path: Path = STATE, lock_path: Pat
             return {"ok": True, "action": action, "watch_key": key,
                     "remaining": len(state["collections"]), "network_calls": 0, "notifications": 0}
         if matches:
-            raise ValueError(f"watch already saved: {key}")
-        metadata = metadata_resolver(contract)
-        display = request.get("display")
-        name = display.strip() if isinstance(display, str) and display.strip() else metadata.get("name")
-        if not isinstance(name, str) or not name.strip():
-            raise RuntimeError("exact collection metadata did not resolve a name")
-        entry = {
-            "name": name.strip(), "contract": contract, "rarity": rarity, "watch_key": key,
-            "enabled": True, "source_url": _source_url(contract, rarity),
-            "baseline_status": "onboarding", "metadata_source": metadata.get("metadata_source", "exact resolver"),
-        }
-        category = request.get("category")
-        if isinstance(category, str) and category.strip():
-            entry["category"] = category.strip()
-        observation = baseline_runner(dict(entry))
-        if observation.get("kind") == "VERIFIED" and isinstance(observation.get("baseline"), dict):
+            saved_notice = (state.get("rarity_onboarding_notices") or {}).get(key)
+            if not saved_notice or saved_notice.get("status") != "pending":
+                raise ValueError(f"watch already saved: {key}")
+            notice = dict(saved_notice)
+            entry = matches[0]
+        else:
+            metadata = metadata_resolver(contract)
+            display = request.get("display")
+            name = display.strip() if isinstance(display, str) and display.strip() else metadata.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise RuntimeError("exact collection metadata did not resolve a name")
+            entry = {
+                "name": name.strip(), "contract": contract, "rarity": rarity, "watch_key": key,
+                "enabled": True, "source_url": _source_url(contract, rarity),
+                "baseline_status": "onboarding", "metadata_source": metadata.get("metadata_source", "exact resolver"),
+            }
+            category = request.get("category")
+            if isinstance(category, str) and category.strip():
+                entry["category"] = category.strip()
+            observation = baseline_runner(dict(entry))
+            if observation.get("kind") != "VERIFIED" or not isinstance(observation.get("baseline"), dict):
+                reason = str(observation.get("reason") or "baseline unavailable")[:300]
+                raise RuntimeError(f"baseline was not verified; watch was not added: {reason}")
             entry["baseline"] = observation["baseline"]
             entry["baseline_status"] = "verified"
             if observation.get("observed_at"):
                 entry["last_successful_observation"] = observation["observed_at"]
-        else:
-            entry["baseline_status"] = "configured-unverified"
-            entry["onboarding_failure"] = str(observation.get("reason") or "baseline unavailable")[:500]
-        state["collections"].append(entry)
-        _atomic_json(Path(state_path), state)
-        return {"ok": True, "action": "add", "watch": _saved_list(state)["watches"][-1],
-                "seeded_existing_inventory": entry["baseline_status"] == "verified",
-                "network_calls": "live metadata and marketplace onboarding", "notifications": 0}
+            state["collections"].append(entry)
+            batch_id = "rarity-onboarding-" + uuid.uuid4().hex
+            notice = {
+                "batch_id": batch_id, "status": "pending",
+                "report": _onboarding_report(entry, state),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            state.setdefault("rarity_onboarding_notices", {})[key] = notice
+            _atomic_json(Path(state_path), state)
+
+    try:
+        message_ids = notice_deliverer(notice["report"], notice["batch_id"])
+        if not message_ids:
+            raise RuntimeError("Discord returned no verified message IDs")
+    except Exception as exc:
+        return {"ok": False, "action": "add", "watch_key": key, "watch_enabled": True,
+                "discord_status": "pending", "error": f"Discord delivery pending: {str(exc)[:240]}",
+                "network_calls": "live metadata and marketplace onboarding" if not matches else 0,
+                "notifications": 0}
+
+    with _lock_context(Path(lock_path)) as acquired:
+        if not acquired:
+            return {"ok": False, "action": "add", "watch_key": key, "watch_enabled": True,
+                    "discord_status": "pending", "error": "Discord sent; saved acknowledgment pending",
+                    "network_calls": 0, "notifications": 1}
+        state = migrated_state(json.loads(Path(state_path).read_text(encoding="utf-8")))
+        saved_notice = (state.get("rarity_onboarding_notices") or {}).get(key)
+        if saved_notice and saved_notice.get("batch_id") == notice["batch_id"]:
+            saved_notice.update(status="delivered", verified_message_ids=message_ids,
+                                delivered_at=datetime.now(timezone.utc).isoformat())
+            _atomic_json(Path(state_path), state)
+        watch = next(item for item in _saved_list(state)["watches"] if item["watch_key"] == key)
+    return {"ok": True, "action": "add", "watch": watch,
+            "seeded_existing_inventory": True, "discord_status": "delivered",
+            "network_calls": "live metadata and marketplace onboarding" if not matches else 0,
+            "notifications": 1}
 
 
 def main() -> int:

@@ -324,11 +324,15 @@ function resolveSeller(wallet) {
   const matches = (aliases.masked_aliases || []).filter(x => x && typeof x.prefix === 'string' && typeof x.suffix === 'string' && normalized.startsWith(x.prefix.toLowerCase()) && normalized.endsWith(x.suffix.toLowerCase())).map(x => x.name_tag).filter(x => typeof x === 'string');
   return { seller_wallet: normalized, seller_name_tag: matches.length === 1 ? matches[0] : null };
 }
-function sellerText(listing) { return listing.seller_name_tag || (listing.seller_wallet ? `...${listing.seller_wallet.slice(-9)}` : 'Seller not recorded'); }
+function sellerText(listing) {
+  const current = resolveSeller(listing.seller_wallet);
+  return current.seller_name_tag || listing.seller_name_tag || (listing.seller_wallet ? `...${listing.seller_wallet.slice(-9)}` : 'Seller not recorded');
+}
 function buyerText(s) {
-  const tagged = s.buyer_display || s.buyer_name_tag;
-  if (tagged) return tagged;
   const wallet = normalizedWallet(s.buyer_wallet || s.buyer);
+  const current = resolveSeller(wallet);
+  const tagged = current.seller_name_tag || s.buyer_display || s.buyer_name_tag;
+  if (tagged) return tagged;
   return wallet ? `...${wallet.slice(-9)}` : 'Buyer not recorded';
 }
 function saleTimeText(s) {
@@ -402,9 +406,19 @@ function heartbeatReport(state, outcome = {}) {
     const unresolved = (outcome.failed_collections || []).map(x => aliases.get(x.name) || x.name.replace(/\s+/g,' '));
     if (unresolved.length) lines.push(`Unresolved: ${unresolved.join('; ')}`);
   }
+  const listingRows = [];
   for (const c of state.collections) {
     if (!c.baseline?.for_sale) continue;
     for (const listing of c.baseline.listings || []) {
+      listingRows.push({c, listing, priceValue:Number(listing.price)});
+    }
+  }
+  listingRows.sort((a, b) => {
+    const left = Number.isFinite(a.priceValue) ? a.priceValue : Number.POSITIVE_INFINITY;
+    const right = Number.isFinite(b.priceValue) ? b.priceValue : Number.POSITIVE_INFINITY;
+    return left - right || String(a.c.name).localeCompare(String(b.c.name));
+  });
+  for (const {c, listing} of listingRows) {
       const pricedState = validRate ? state : {...state, current_pol_usd:undefined};
       const price = listingPriceText(listing, pricedState);
       const usdMissing = !validRate || listing.currency !== 'POLYGON';
@@ -413,7 +427,6 @@ function heartbeatReport(state, outcome = {}) {
       const sellerLabel = seller && !/0x[0-9a-f]{40}/i.test(seller)
         ? seller : (wallet ? `...${wallet.slice(-4)}` : 'Seller not recorded');
       lines.push(`• ${rarityLabel(c)} ${aliases.get(c.name)} — ${price}${usdMissing ? ' (USD unavailable)' : ''} — ${sellerLabel}`);
-    }
   }
   if (!lines.some(x => x.startsWith('•'))) lines.push('No active listings in saved verified state.');
   return lines.join('\r\n') + '\r\n';
@@ -727,4 +740,4 @@ async function collectMain() {
   if (deliver) process.stdout.write(text);
 }
 if (typeof require !== 'undefined' && typeof module !== 'undefined' && require.main === module) main().catch(error => { console.error(`Deterministic monitor fatal error: ${error.stack || error}`); process.exitCode = 1; });
-if (typeof module !== 'undefined') module.exports = {migrateWatchState, watchKey, selectCollections, hasExactRarityTrait, report};
+if (typeof module !== 'undefined') module.exports = {migrateWatchState, watchKey, selectCollections, hasExactRarityTrait, report, heartbeatReport};

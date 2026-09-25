@@ -51,10 +51,17 @@ class RarityWatchManagerTests(unittest.TestCase):
                 return {'name': 'Exact Collection'}
             def baseline(entry):
                 calls.append(('baseline', entry['watch_key'], entry['source_url']))
-                return {'kind': 'VERIFIED', 'baseline': {'for_sale': True, 'listing_count': 1, 'listings': [{'token_id': '7'}]}}
+                return {'kind': 'VERIFIED', 'baseline': {'for_sale': True, 'listing_count': 1, 'listings': [
+                    {'token_id': '7', 'price': 40, 'currency': 'POL',
+                     'seller_wallet': '0x' + '0' * 36 + 'bd4c'}]}}
+            delivered = []
+            def deliver(text, batch_id):
+                delivered.append((text, batch_id))
+                return ['discord-message-1']
             result = manager.execute(
                 {'action': 'add', 'contract': contract.upper().replace('0X', '0x'), 'rarity': 'Legendary', 'category': 'DC'},
-                state_path=state_path, lock_path=root / 'lock', metadata_resolver=resolve, baseline_runner=baseline)
+                state_path=state_path, lock_path=root / 'lock', metadata_resolver=resolve,
+                baseline_runner=baseline, notice_deliverer=deliver)
             saved = json.loads(state_path.read_text(encoding='utf-8'))
             self.assertTrue(result['ok'])
             self.assertEqual(result['watch']['watch_key'], contract + '|Legendary')
@@ -63,9 +70,61 @@ class RarityWatchManagerTests(unittest.TestCase):
             self.assertEqual(saved['collections'][1]['rarity'], 'Legendary')
             self.assertEqual(saved['collections'][1]['category'], 'DC')
             self.assertEqual(saved['pending_exotic_change_candidates'], {contract + '|Exotic': 'keep'})
-            self.assertEqual(result['notifications'], 0)
+            self.assertEqual(result['notifications'], 1)
+            self.assertEqual(result['discord_status'], 'delivered')
+            self.assertIn('[Legendary] Exact Collection', delivered[0][0])
+            self.assertIn('1 active BUY NOW listing verified', delivered[0][0])
+            self.assertIn('40 POL', delivered[0][0])
+            self.assertIn('...bd4c', delivered[0][0])
+            self.assertNotIn(contract, delivered[0][0])
+            self.assertNotIn('token_id', delivered[0][0])
+            self.assertEqual(saved['rarity_onboarding_notices'][contract + '|Legendary']['status'], 'delivered')
             self.assertEqual(calls[0], ('metadata', contract))
             self.assertIn('traits%5BRarity%5D%5B0%5D=Legendary', calls[1][2])
+
+    def test_unverified_add_is_not_saved_or_reported_as_no_listings(self):
+        manager = load_manager(); contract = '0x' + 'd' * 40
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); state_path = root / 'state.json'
+            state_path.write_text(json.dumps({'collections': []}), encoding='utf-8')
+            delivered = []
+            with self.assertRaisesRegex(RuntimeError, 'baseline was not verified'):
+                manager.execute(
+                    {'action': 'add', 'contract': contract, 'rarity': 'Exotic'},
+                    state_path=state_path, lock_path=root / 'lock',
+                    metadata_resolver=lambda _: {'name': 'Unverified'},
+                    baseline_runner=lambda _: {'kind': 'UNAVAILABLE', 'reason': 'loading'},
+                    notice_deliverer=lambda *args: delivered.append(args))
+            self.assertEqual(json.loads(state_path.read_text())['collections'], [])
+            self.assertEqual(delivered, [])
+
+    def test_pending_discord_notice_retries_without_marketplace_calls(self):
+        manager = load_manager(); contract = '0x' + 'e' * 40; key = contract + '|Legendary'
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); state_path = root / 'state.json'
+            state_path.write_text(json.dumps({'collections': [], 'current_pol_usd': {'rate': 0.25}}), encoding='utf-8')
+            def fail_delivery(_text, _batch_id):
+                raise RuntimeError('discord offline')
+            first = manager.execute(
+                {'action': 'add', 'contract': contract, 'rarity': 'Legendary'},
+                state_path=state_path, lock_path=root / 'lock',
+                metadata_resolver=lambda _: {'name': 'No Listings'},
+                baseline_runner=lambda _: {'kind': 'VERIFIED', 'baseline': {'for_sale': False, 'listing_count': 0, 'listings': []}},
+                notice_deliverer=fail_delivery)
+            self.assertFalse(first['ok'])
+            self.assertEqual(first['discord_status'], 'pending')
+            calls = []
+            retry = manager.execute(
+                {'action': 'add', 'contract': contract, 'rarity': 'Legendary'},
+                state_path=state_path, lock_path=root / 'lock',
+                metadata_resolver=lambda _: self.fail('metadata must not run'),
+                baseline_runner=lambda _: self.fail('baseline must not run'),
+                notice_deliverer=lambda text, batch: calls.append((text, batch)) or ['discord-message-2'])
+            self.assertTrue(retry['ok'])
+            self.assertEqual(retry['discord_status'], 'delivered')
+            self.assertIn('No active [Legendary] BUY NOW listings verified', calls[0][0])
+            saved = json.loads(state_path.read_text())
+            self.assertEqual(saved['rarity_onboarding_notices'][key]['status'], 'delivered')
 
     def test_add_rejects_bad_contract_and_exact_duplicate_before_dependencies(self):
         manager = load_manager()

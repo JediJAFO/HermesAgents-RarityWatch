@@ -34,5 +34,24 @@ function testReportUsesExplicitRarityLabel() {
   assert.match(text, /\[Legendary\]/);
 }
 
-for (const test of [testMigrationPreservesLegacyAndKeysRarity, testSameContractBothRaritiesAreIndependent, testReportUsesExplicitRarityLabel]) test();
+function testHeartbeatUsesExplicitRarityLabelAndSeller() {
+  const c = {name:'Same',contract:'0x'+'d'.repeat(40),rarity:'Legendary',watch_key:'0x'+'d'.repeat(40)+'|Legendary',baseline:{for_sale:true,listing_count:1,listings:[{price:10,currency:'POLYGON',seller_wallet:'0x'+'1'.repeat(36)+'abcd'}]}};
+  const text = collector.heartbeatReport({collections:[c],current_pol_usd:{rate:0.2}}, {complete:true,saved_preview:true});
+  assert.match(text, /\[Legendary\] Same/);
+  assert.match(text, /\$2\.00/);
+  assert.match(text, /\.\.\.abcd/);
+}
+
+function testHeartbeatSortsListingsByAscendingSellingPrice() {
+  const state = {current_pol_usd:{rate:0.2},collections:[
+    {name:'Highest',rarity:'Exotic',baseline:{for_sale:true,listings:[{price:500,currency:'POLYGON'}]}},
+    {name:'Lowest',rarity:'Legendary',baseline:{for_sale:true,listings:[{price:25,currency:'POLYGON'}]}},
+    {name:'Middle',rarity:'Exotic',baseline:{for_sale:true,listings:[{price:100,currency:'POLYGON'}]}},
+  ]};
+  const text = collector.heartbeatReport(state, {complete:true,saved_preview:true});
+  assert.ok(text.indexOf('Lowest') < text.indexOf('Middle'));
+  assert.ok(text.indexOf('Middle') < text.indexOf('Highest'));
+}
+
+for (const test of [testMigrationPreservesLegacyAndKeysRarity, testSameContractBothRaritiesAreIndependent, testReportUsesExplicitRarityLabel, testHeartbeatUsesExplicitRarityLabelAndSeller, testHeartbeatSortsListingsByAscendingSellingPrice]) test();
 console.log('rarity collector tests passed');

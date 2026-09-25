@@ -41,16 +41,18 @@ def resolve_buyer(wallet: object) -> dict:
 
 
 def party_label(record: dict | None, party: str) -> str:
-    """Return a party's verified Name Tag, else a fixed-length wallet suffix."""
+    """Prefer the current shared alias; fall back to saved labels and suffix."""
     if not isinstance(record, dict):
         return f"{party.title()} not recorded"
+    resolved = resolve_buyer(record.get(f"{party}_wallet") or record.get(party))
+    if resolved["buyer_name_tag"]:
+        return resolved["buyer_name_tag"]
     raw = record.get(f"{party}_display") or record.get(f"{party}_name_tag")
     if isinstance(raw, str) and raw.strip():
         return raw.strip()
-    resolved = resolve_buyer(record.get(f"{party}_wallet") or record.get(party))
     if not resolved["buyer_wallet"]:
         return f"{party.title()} not recorded"
-    return resolved["buyer_name_tag"] or wallet_display(resolved["buyer_wallet"])
+    return wallet_display(resolved["buyer_wallet"])
 
 
 def buyer_label(sale: dict | None) -> str:
