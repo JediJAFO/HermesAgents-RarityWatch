@@ -5,9 +5,12 @@ import argparse
 import html
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import secrets
+import subprocess
+import sys
 from typing import Any, Callable
 from urllib.parse import parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,6 +19,9 @@ HOME = Path(__file__).resolve().parents[1]
 STATE = HOME / "price-watches" / "mcfarlane-exotics.json"
 LOCK = HOME / "price-watches" / ".exotic-execution-lock"
 CSRF_SECRET = HOME / "cache" / "rarity-watch-portal-csrf.key"
+UPDATE_STATUS = HOME / "price-watches" / "rarity-manual-update-status.json"
+UPDATE_LAUNCH_LOCK = HOME / "price-watches" / ".rarity-manual-update.lock"
+UPDATE_RUNNER = HOME / "scripts" / "run_rarity_update_and_heartbeat.py"
 MAX_REQUEST_BYTES = 20_000
 
 
@@ -45,9 +51,58 @@ def _persistent_csrf_token(path: Path) -> str:
     return token
 
 
+def _read_update_status() -> dict[str, Any]:
+    if not UPDATE_STATUS.exists():
+        return {"status": "never_run", "llm_tokens": 0}
+    try:
+        result = json.loads(UPDATE_STATUS.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"status": "unavailable", "llm_tokens": 0}
+    result["llm_tokens"] = 0
+    return result
+
+
+def _start_runner(*, confirm_pending: bool = False) -> dict[str, Any]:
+    try:
+        descriptor = os.open(UPDATE_LAUNCH_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return {"ok": False, "status": "already_running", "llm_tokens": 0}
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write("launching\n")
+        subprocess_flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        command = [sys.executable, str(UPDATE_RUNNER)]
+        if confirm_pending:
+            command.append("--confirm-pending")
+        process = subprocess.Popen(
+            command, cwd=str(HOME / "scripts"),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=subprocess_flags, start_new_session=os.name != "nt")
+        UPDATE_LAUNCH_LOCK.write_text(str(process.pid) + "\n", encoding="utf-8")
+        if confirm_pending:
+            return {"ok": True, "status": "confirmation_started", "pid": process.pid, "llm_tokens": 0,
+                    "message": "Pending-listing confirmation started. Only pending watches will be rechecked after the safe pacing delay."}
+        return {"ok": True, "status": "started", "pid": process.pid, "llm_tokens": 0,
+                "message": "Full update started. Purchase-priority candidates will be rechecked automatically, then a fresh heartbeat will be sent after a complete check."}
+    except Exception:
+        UPDATE_LAUNCH_LOCK.unlink(missing_ok=True)
+        raise
+
+
+def _start_update() -> dict[str, Any]:
+    return _start_runner()
+
+
+def _start_confirmation() -> dict[str, Any]:
+    return _start_runner(confirm_pending=True)
+
+
 def make_server(*, state_path: Path = STATE, lock_path: Path = LOCK,
                 execute_fn: Callable[..., dict[str, Any]] = _manager_execute,
-                port: int = 8767, csrf_path: Path = CSRF_SECRET) -> ThreadingHTTPServer:
+                port: int = 8767, csrf_path: Path = CSRF_SECRET,
+                update_start_fn: Callable[[], dict[str, Any]] = _start_update,
+                confirmation_start_fn: Callable[[], dict[str, Any]] = _start_confirmation,
+                update_status_fn: Callable[[], dict[str, Any]] = _read_update_status) -> ThreadingHTTPServer:
     token = _persistent_csrf_token(csrf_path)
 
     class Handler(BaseHTTPRequestHandler):
@@ -63,9 +118,9 @@ body{font:16px system-ui;max-width:900px;margin:0;padding:25px;background:#11182
 </style></head><body><h1>Exotic / Legendary Watch Manager</h1><p>Zero LLM tokens. Add completes only after the baseline is verified; it enables subsequent interval/8AM heartbeat coverage and posts a read-back-verified availability result to Discord. If Discord is temporarily unavailable, the watch remains enabled and the result is shown as pending for an exact retry. Disable, Remove, and List Saved are saved-state only: no marketplace calls and no notifications.</p>
 <form method="post" action="/execute"><input type="hidden" name="csrf" value="{token}"><div class="grid">
 <label>Polygon contract<input name="contract" placeholder="0x + 40 hexadecimal characters"></label>
-<label>Rarity<select name="rarity"><option value="Exotic">Exotic</option><option value="Legendary">Legendary</option></select></label>
+<label>Rarity<select name="rarity"><option value="Exotic">Exotic</option><option value="Legendary">Legendary</option><option value="Epic">Epic</option><option value="Rare">Rare</option></select></label>
 <label>Optional display name<input name="display"></label><label>Optional category<input name="category"></label></div>
-<div class="actions"><button name="action" value="add">Add (Live)</button><button name="action" value="disable">Disable</button><button name="action" value="remove">Remove</button><button name="action" value="list" formnovalidate>List Saved</button></div></form>
+<div class="actions"><button name="action" value="add">Add (Live)</button><button name="action" value="disable">Disable</button><button name="action" value="remove">Remove</button><button name="action" value="list" formnovalidate>List Saved</button><button name="action" value="update" formnovalidate>Run Update + Heartbeat</button><button name="action" value="confirm_pending" formnovalidate>Confirm Pending Listings</button><button name="action" value="update_status" formnovalidate>Update Status</button></div></form>
 <h2>Result</h2><pre id="result" aria-live="polite">{result}</pre></body></html>'''
             payload = content.replace("{token}", token).replace("{result}", html.escape(result)).encode()
             self.send_response(code)
@@ -90,23 +145,30 @@ body{font:16px system-ui;max-width:900px;margin:0;padding:25px;background:#11182
                     self.send_error(403)
                     return
                 action = data.get("action", [""])[0]
-                if action not in {"add", "disable", "remove", "list"}:
+                if action not in {"add", "disable", "remove", "list", "update", "confirm_pending", "update_status"}:
                     raise ValueError(f"unsupported action: {action}")
                 request = {"action": action}
-                if action != "list":
+                if action not in {"list", "update", "confirm_pending", "update_status"}:
                     contract = data.get("contract", [""])[0].strip()
                     rarity = data.get("rarity", [""])[0]
                     if not re.fullmatch(r"0x[0-9a-fA-F]{40}", contract):
                         raise ValueError("Polygon contract must be 0x followed by exactly 40 hexadecimal characters")
-                    if rarity not in {"Exotic", "Legendary"}:
-                        raise ValueError("rarity must be exactly Exotic or Legendary")
+                    if rarity not in {"Exotic", "Legendary", "Epic", "Rare"}:
+                        raise ValueError("rarity must be exactly Exotic, Legendary, Epic, or Rare")
                     request.update(contract=contract, rarity=rarity)
                     if action == "add":
                         for field in ("display", "category"):
                             value = data.get(field, [""])[0].strip()
                             if value:
                                 request[field] = value
-                result = execute_fn(request, state_path=Path(state_path), lock_path=Path(lock_path))
+                if action == "update":
+                    result = update_start_fn()
+                elif action == "confirm_pending":
+                    result = confirmation_start_fn()
+                elif action == "update_status":
+                    result = update_status_fn()
+                else:
+                    result = execute_fn(request, state_path=Path(state_path), lock_path=Path(lock_path))
                 if action == "list":
                     rows = [f"{watch.get('enabled') and 'ON ' or 'OFF'} {watch.get('rarity')} {watch.get('name')}  {watch.get('contract')}" for watch in result.get("watches", [])]
                     text = "\n".join([f"{result['count']} saved watch(es)", *rows,

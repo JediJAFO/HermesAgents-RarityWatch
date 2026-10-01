@@ -23,6 +23,8 @@ function executionBudget(selectedCount) {
 const ET = new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const SUPPORTED_RARITIES = new Set(['Exotic', 'Legendary', 'Epic', 'Rare']);
+function isSupportedRarity(rarity) { return SUPPORTED_RARITIES.has(rarity); }
 function watchKey(collection) {
   const rarity = collection.rarity || 'Exotic';
   return `${String(collection.contract || '').toLowerCase()}|${rarity}`;
@@ -435,6 +437,12 @@ function report(state, outcome) {
   if (outcome.shared_failure === 'certificate_authority_invalid') {
     return 'McFarlane Exotic Watch — HTTPS certificate validation failed; listings unavailable. All last-known-good listings retained. Will check again at the next primary interval.\r\n';
   }
+  const failures = outcome.failed_collections || [];
+  const sharedBrowserUnavailable = failures.length > 0
+    && failures.every(x => /connect ECONNREFUSED (?:127\.0\.0\.1|::1):9222/i.test(String(x.type || '')));
+  if (sharedBrowserUnavailable && !(outcome.discord_changes || []).length) {
+    return `**McFarlane Rarity Watch — browser unavailable**\r\n${failures.length} watches were not checked; last-known-good data retained. Retry queued.\r\nLast complete check: ${state.last_successful_monitor_run || '—'}\r\n`;
+  }
   if (outcome.daily_heartbeat_date) {
     const heartbeat = heartbeatReport(state, outcome);
     return (outcome.discord_changes || []).length
@@ -559,7 +567,7 @@ async function main() {
   try {
     if (process.argv?.includes('--observe-onboarding-entry')) {
       const entry = migrateWatchState({collections:[JSON.parse(process.env.MCFARLANE_ONBOARD_ENTRY || '{}')]}).collections[0];
-      if (!/^0x[0-9a-f]{40}$/.test(entry.contract) || !['Exotic','Legendary'].includes(entry.rarity)) throw new Error('invalid onboarding entry');
+      if (!/^0x[0-9a-f]{40}$/.test(entry.contract) || !isSupportedRarity(entry.rarity)) throw new Error('invalid onboarding entry');
       let browser, page;
       try {
         browser = await chromium.connectOverCDP(CDP, {timeout:20000});
@@ -740,4 +748,4 @@ async function collectMain() {
   if (deliver) process.stdout.write(text);
 }
 if (typeof require !== 'undefined' && typeof module !== 'undefined' && require.main === module) main().catch(error => { console.error(`Deterministic monitor fatal error: ${error.stack || error}`); process.exitCode = 1; });
-if (typeof module !== 'undefined') module.exports = {migrateWatchState, watchKey, selectCollections, hasExactRarityTrait, report, heartbeatReport};
+if (typeof module !== 'undefined') module.exports = {migrateWatchState, watchKey, selectCollections, isSupportedRarity, hasExactRarityTrait, report, heartbeatReport};

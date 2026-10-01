@@ -65,9 +65,11 @@ class RarityWatchPortalTests(unittest.TestCase):
         self.assertIn('name="rarity"', body)
         self.assertIn('value="Exotic"', body)
         self.assertIn('value="Legendary"', body)
+        self.assertIn('value="Epic"', body)
+        self.assertIn('value="Rare"', body)
         self.assertIn('name="display"', body)
         self.assertIn('name="category"', body)
-        for label in ("Add (Live)", "Disable", "Remove", "List Saved"):
+        for label in ("Add (Live)", "Disable", "Remove", "List Saved", "Run Update + Heartbeat", "Confirm Pending Listings", "Update Status"):
             self.assertIn(label, body)
         self.assertIn("Add completes only after the baseline is verified", body)
         self.assertIn("read-back-verified availability result to Discord", body)
@@ -132,6 +134,30 @@ class RarityWatchPortalTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertIn("0 saved watch(es)", response.read().decode())
 
+    def test_update_buttons_use_deterministic_local_runner(self):
+        started = []
+        confirmations = []
+        statuses = []
+        server = self.portal.make_server(
+            state_path=self.state, lock_path=self.root / "lock-3", execute_fn=lambda *_a, **_k: {},
+            port=0, csrf_path=self.root / "csrf-update",
+            update_start_fn=lambda: started.append(True) or {"ok": True, "status": "started", "llm_tokens": 0},
+            confirmation_start_fn=lambda: confirmations.append(True) or {"ok": True, "status": "confirmation_started", "llm_tokens": 0},
+            update_status_fn=lambda: statuses.append(True) or {"status": "running", "llm_tokens": 0})
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
+        url = "http://" + f"127.0.0.1:{server.server_port}"
+        body = urllib.request.urlopen(url + "/").read().decode()
+        token = re.search(r'name="csrf" value="([^"]+)"', body)[1]
+        for action, marker in (("update", started), ("confirm_pending", confirmations), ("update_status", statuses)):
+            request = urllib.request.Request(url + "/execute",
+                data=urllib.parse.urlencode({"csrf": token, "action": action}).encode(),
+                headers={"Origin": url, "Content-Type": "application/x-www-form-urlencoded"})
+            with urllib.request.urlopen(request) as response:
+                text = response.read().decode()
+            self.assertEqual(marker, [True])
+            self.assertIn("llm_tokens", text)
+
     def test_rejects_bad_host_origin_csrf_route_and_request_size(self):
         token = self.token()
         cases = [
@@ -174,13 +200,15 @@ class RarityWatchPortalTests(unittest.TestCase):
              {"action": "disable", "contract": contract, "rarity": "Exotic"}),
             ({"csrf": token, "action": "remove", "contract": contract, "rarity": "Legendary"},
              {"action": "remove", "contract": contract, "rarity": "Legendary"}),
+            ({"csrf": token, "action": "disable", "contract": contract, "rarity": "Rare"},
+             {"action": "disable", "contract": contract, "rarity": "Rare"}),
         ]
         for values, expected in submissions:
             with self.post(values) as response:
                 self.assertEqual(response.status, 200)
             self.assertEqual(self.calls[-1][0], expected)
             self.assertEqual(self.calls[-1][1], {"state_path": self.state, "lock_path": self.root / "lock"})
-        self.assertEqual([call[0]["action"] for call in self.calls], ["add", "disable", "remove"])
+        self.assertEqual([call[0]["action"] for call in self.calls], ["add", "disable", "remove", "disable"])
 
     def test_manager_failure_is_visible_without_leaking_a_traceback(self):
         values = {"csrf": self.token(), "action": "add", "contract": "0x" + "a" * 40,

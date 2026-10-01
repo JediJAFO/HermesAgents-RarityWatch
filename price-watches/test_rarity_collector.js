@@ -28,6 +28,22 @@ function testSameContractBothRaritiesAreIndependent() {
   assert.strictEqual(collector.hasExactRarityTrait('TRAITS\nRarity\nExotic\nBUY NOW', 'Legendary'), false);
 }
 
+function testEpicAndRareAreSupportedByCollectorAndHeartbeat() {
+  assert.strictEqual(collector.isSupportedRarity('Epic'), true);
+  assert.strictEqual(collector.isSupportedRarity('Rare'), true);
+  assert.strictEqual(collector.isSupportedRarity('Mythic'), false);
+  const contract = '0x'+'e'.repeat(40);
+  const collections = ['Epic','Rare'].map((rarity,index) => ({
+    name:rarity, contract, rarity, watch_key:`${contract}|${rarity}`, enabled:true,
+    baseline:{for_sale:true,listing_count:1,listings:[{price:20+index,currency:'POLYGON',seller_wallet:'0x'+'2'.repeat(40)}]},
+  }));
+  const state = collector.migrateWatchState({collections,current_pol_usd:{rate:0.25}});
+  assert.deepStrictEqual(collector.selectCollections(state, {}).map(x => x.rarity), ['Epic','Rare']);
+  const text = collector.heartbeatReport(state, {complete:true,saved_preview:true});
+  assert.match(text, /\[Epic\] Epic/);
+  assert.match(text, /\[Rare\] Rare/);
+}
+
 function testReportUsesExplicitRarityLabel() {
   const c = {name:'Same',contract:'0x'+'c'.repeat(40),rarity:'Legendary',watch_key:'0x'+'c'.repeat(40)+'|Legendary',source_url:'https://mcfarlanetoys.digital/',baseline:{for_sale:false,listing_count:0,listings:[]}};
   const text = collector.report({collections:[c]}, {complete:true,failed_collections:[],discord_changes:[{watch_key:c.watch_key,name:c.name,rarity:c.rarity,removed_listings:[]}]});
@@ -53,5 +69,19 @@ function testHeartbeatSortsListingsByAscendingSellingPrice() {
   assert.ok(text.indexOf('Middle') < text.indexOf('Highest'));
 }
 
-for (const test of [testMigrationPreservesLegacyAndKeysRarity, testSameContractBothRaritiesAreIndependent, testReportUsesExplicitRarityLabel, testHeartbeatUsesExplicitRarityLabelAndSeller, testHeartbeatSortsListingsByAscendingSellingPrice]) test();
+function testReportCompactsSharedBrowserConnectionFailure() {
+  const failure = 'browserType.connectOverCDP: connect ECONNREFUSED 127.0.0.1:9222\nCall log:\nvery long detail';
+  const outcome = {complete:false,failed_collections:[
+    {name:'One',rarity:'Exotic',type:failure},
+    {name:'Two',rarity:'Legendary',type:failure},
+  ],discord_changes:[]};
+  const text = collector.report({collections:[],last_successful_monitor_run:'2026-09-29T08:00:11-04:00'}, outcome);
+  assert.match(text, /browser unavailable/i);
+  assert.match(text, /2 watches were not checked/i);
+  assert.match(text, /last-known-good data retained/i);
+  assert.doesNotMatch(text, /Call log/);
+  assert.doesNotMatch(text, /\*\*\[Exotic\] One\*\*/);
+}
+
+for (const test of [testMigrationPreservesLegacyAndKeysRarity, testSameContractBothRaritiesAreIndependent, testEpicAndRareAreSupportedByCollectorAndHeartbeat, testReportUsesExplicitRarityLabel, testHeartbeatUsesExplicitRarityLabelAndSeller, testHeartbeatSortsListingsByAscendingSellingPrice, testReportCompactsSharedBrowserConnectionFailure]) test();
 console.log('rarity collector tests passed');

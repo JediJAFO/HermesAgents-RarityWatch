@@ -49,7 +49,7 @@ function Panel() {
     ]}),
     jsxs('section', { className: 'grid grid-cols-2 gap-2', children: [
       jsx(Input, { value: contract, onChange: event => setContract(event.target.value), placeholder: 'Polygon contract: 0x + 40 hex', 'aria-label': 'Polygon contract' }),
-      jsx('select', { value: rarity, onChange: event => setRarity(event.target.value), className: 'rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-3 py-2', 'aria-label': 'Rarity', children: [jsx('option', {value:'Exotic', children:'Exotic'}), jsx('option', {value:'Legendary', children:'Legendary'})] }),
+      jsx('select', { value: rarity, onChange: event => setRarity(event.target.value), className: 'rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-3 py-2', 'aria-label': 'Rarity', children: [jsx('option', {value:'Exotic', children:'Exotic'}), jsx('option', {value:'Legendary', children:'Legendary'}), jsx('option', {value:'Epic', children:'Epic'}), jsx('option', {value:'Rare', children:'Rare'})] }),
       jsx(Input, { value: display, onChange: event => setDisplay(event.target.value), placeholder: 'Optional display name', 'aria-label': 'Display name' }),
       jsx(Input, { value: category, onChange: event => setCategory(event.target.value), placeholder: 'Optional category', 'aria-label': 'Category' })
     ]}),

@@ -22,11 +22,52 @@ LEDGER = HOME / 'cron' / 'executions.db'
 ET = ZoneInfo('America/New_York')
 
 
+def seed_owed_heartbeat(state, ledger, now=None):
+    """Recover today's successful 08:00 occurrence after its process exited."""
+    now = now or datetime.now(ET)
+    today = now.astimezone(ET).date()
+    with closing(sqlite3.connect(Path(ledger).as_uri()+'?mode=ro', uri=True)) as conn:
+        rows = conn.execute(
+            "SELECT id,scheduled_instant,status,started_at,finished_at,error FROM executions "
+            "WHERE job_id=? AND status='completed' AND error IS NULL ORDER BY scheduled_instant DESC",
+            ('__PRIVATE_JOB_ID__',),
+        ).fetchall()
+    match = None
+    for row in rows:
+        if not row[1] or not row[3] or not row[4]:
+            continue
+        scheduled = datetime.fromisoformat(row[1].replace('Z', '+00:00'))
+        local = scheduled.astimezone(ET)
+        if local.date() == today and (local.hour, local.minute, local.second, local.microsecond) == (8, 0, 0, 0):
+            match = row
+            break
+    if not match:
+        return None
+    date = today.isoformat()
+    if (state.get('discord_daily_heartbeat') or {}).get('date', '') >= date:
+        return None
+    if (state.get('pending8am') or {}).get('date', '') >= date:
+        return None
+    state['pending8am'] = {
+        'date': date, 'execution_id': match[0], 'scheduled_at': match[1],
+        'generation': state.get('last_primary_exotic_run_id'),
+        'required_observation_at': match[3], 'armed_at': now.isoformat(),
+        'source': 'verified-completed-cron-ledger-recovery',
+    }
+    return match[0]
+
+
+def _write_state(state):
+    tmp = STATE.with_name(STATE.name+f'.{os.getpid()}.tmp')
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
+    os.replace(tmp, STATE)
+
+
 def seed(execution_id, now=None):
     """Caller must own execution lease; reread state after acquisition."""
     now = now or datetime.now(ET)
     with closing(sqlite3.connect(LEDGER.as_uri()+'?mode=ro',uri=True)) as conn:
-        row = conn.execute('SELECT scheduled_instant,status FROM executions WHERE id=? AND job_id=?',
+        row = conn.execute('SELECT scheduled_instant,status,started_at FROM executions WHERE id=? AND job_id=?',
                            (execution_id,'__PRIVATE_JOB_ID__')).fetchone()
     if not row or not row[0] or row[1] not in ('running','completed'):
         raise ValueError('Not a verified primary scheduled execution')
@@ -44,10 +85,16 @@ def seed(execution_id, now=None):
         return 0
     state['pending8am'] = {'date':date,'execution_id':execution_id,'scheduled_at':row[0],
                            'generation':state.get('last_primary_exotic_run_id'),
+                           'required_observation_at':row[2] or row[0],
                            'armed_at':now.isoformat(),'source':'verified-cron-ledger-repair'}
-    tmp=STATE.with_name(STATE.name+f'.{os.getpid()}.tmp')
-    tmp.write_text(json.dumps(state,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-    os.replace(tmp,STATE)
+    _write_state(state)
+    return 0
+
+
+def recover_completed_occurrence():
+    state = json.loads(STATE.read_text(encoding='utf-8'))
+    if seed_owed_heartbeat(state, LEDGER):
+        _write_state(state)
     return 0
 
 
@@ -84,6 +131,9 @@ def main():
     args=parser.parse_args()
     if args.status: return status()
     if args.seed_execution: return run_locked(lambda:seed(args.seed_execution))
+    recovered = run_locked(recover_completed_occurrence)
+    if recovered == BUSY:
+        return 0
     return handoff()
 
 if __name__=='__main__': raise SystemExit(main())

@@ -9,6 +9,11 @@ API = Path(__file__).parents[1] / 'plugins' / 'rarity-watch-manager' / 'dashboar
 
 
 class RarityWatchPluginApiTests(unittest.TestCase):
+    def test_desktop_dropdown_includes_every_supported_rarity(self):
+        source = (API.parents[1] / 'desktop' / 'plugin.js').read_text(encoding='utf-8')
+        for rarity in ('Exotic', 'Legendary', 'Epic', 'Rare'):
+            self.assertIn(f"value:'{rarity}'", source)
+
     def test_list_endpoint_uses_saved_state_without_mutation(self):
         spec = importlib.util.spec_from_file_location('rarity_watch_plugin_api', API)
         module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)

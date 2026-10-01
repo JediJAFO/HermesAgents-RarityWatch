@@ -1,4 +1,4 @@
-"""Deterministic saved-state manager for Exotic/Legendary watches.
+"""Deterministic saved-state manager for supported rarity watches.
 
 Every operation is local Python/Node code. No LLM or agent turn is involved.
 """
@@ -23,7 +23,7 @@ CATALOG = HOME / "price-watches" / "mcfarlane-dc-sales.json"
 NODE = HOME / "node" / "node.exe"
 COLLECTOR = HOME / "price-watches" / "run_mcfarlane_exotic_deterministic.js"
 LOCK = HOME / "price-watches" / ".exotic-execution-lock"
-RARITIES = ("Exotic", "Legendary")
+RARITIES = ("Exotic", "Legendary", "Epic", "Rare")
 CONTRACT_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
@@ -60,7 +60,7 @@ def _validate(contract: Any, rarity: Any) -> tuple[str, str]:
     if not isinstance(contract, str) or not CONTRACT_RE.fullmatch(contract):
         raise ValueError("Polygon contract must be 0x followed by exactly 40 hexadecimal characters")
     if rarity not in RARITIES:
-        raise ValueError("rarity must be exactly Exotic or Legendary")
+        raise ValueError("rarity must be exactly Exotic, Legendary, Epic, or Rare")
     return contract.lower(), rarity
 
 
@@ -293,7 +293,7 @@ def execute(request: dict[str, Any], *, state_path: Path = STATE, lock_path: Pat
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Manage Exotic/Legendary collection watches without an LLM")
+    parser = argparse.ArgumentParser(description="Manage rarity collection watches without an LLM")
     parser.add_argument("--json", help="JSON request; stdin is used when omitted")
     args = parser.parse_args()
     request = json.loads(args.json if args.json is not None else __import__("sys").stdin.read())

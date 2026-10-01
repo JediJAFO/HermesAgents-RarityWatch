@@ -141,6 +141,8 @@ class BackupTests(unittest.TestCase):
     def test_rarity_manager_sources_are_in_exotic_backup(self):
         relative={p.relative_to(b.HOME).as_posix() for p in b.source_paths('exotic')}
         self.assertIn('scripts/rarity_watch_manager.py',relative)
+        self.assertIn('scripts/run_rarity_update_and_heartbeat.py',relative)
+        self.assertIn('scripts/test_run_rarity_update_and_heartbeat.py',relative)
         self.assertIn('price-watches/test_rarity_collector.js',relative)
         self.assertIn('price-watches/rarity_watch_discord_delivery.py',relative)
         self.assertIn('plugins/rarity-watch-manager/desktop/plugin.js',relative)
