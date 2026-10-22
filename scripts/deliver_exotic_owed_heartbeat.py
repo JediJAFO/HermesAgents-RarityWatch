@@ -1,4 +1,4 @@
-"""Saved-only owed 8AM handoff. No browser, marketplace, or sender calls.
+"""Saved-only owed 9AM handoff. No browser, marketplace, or sender calls.
 
 Default: stdout once when debt is due and every collection has recovered;
 cron owns actual Discord delivery. --status never consumes. --seed-execution
@@ -23,7 +23,7 @@ ET = ZoneInfo('America/New_York')
 
 
 def seed_owed_heartbeat(state, ledger, now=None):
-    """Recover today's successful 08:00 occurrence after its process exited."""
+    """Recover today's successful 09:00 occurrence after its process exited."""
     now = now or datetime.now(ET)
     today = now.astimezone(ET).date()
     with closing(sqlite3.connect(Path(ledger).as_uri()+'?mode=ro', uri=True)) as conn:
@@ -38,7 +38,7 @@ def seed_owed_heartbeat(state, ledger, now=None):
             continue
         scheduled = datetime.fromisoformat(row[1].replace('Z', '+00:00'))
         local = scheduled.astimezone(ET)
-        if local.date() == today and (local.hour, local.minute, local.second, local.microsecond) == (8, 0, 0, 0):
+        if local.date() == today and (local.hour, local.minute, local.second, local.microsecond) == (9, 0, 0, 0):
             match = row
             break
     if not match:
@@ -75,8 +75,8 @@ def seed(execution_id, now=None):
     if scheduled.tzinfo is None:
         raise ValueError('Occurrence lacks timezone')
     local = scheduled.astimezone(ET)
-    if local.date() != now.astimezone(ET).date() or (local.hour,local.minute,local.second,local.microsecond) != (8,0,0,0) or scheduled > now:
-        raise ValueError('Only today actual elapsed 08:00 ET occurrence can be repaired')
+    if local.date() != now.astimezone(ET).date() or (local.hour,local.minute,local.second,local.microsecond) != (9,0,0,0) or scheduled > now:
+        raise ValueError('Only today actual elapsed 09:00 ET occurrence can be repaired')
     state = json.loads(STATE.read_text(encoding='utf-8'))
     date = local.date().isoformat()
     if (state.get('discord_daily_heartbeat') or {}).get('date','') >= date:

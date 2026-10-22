@@ -1,4 +1,5 @@
 import hashlib
+import html
 import importlib.util
 import json
 from pathlib import Path
@@ -133,6 +134,66 @@ class RarityWatchPortalTests(unittest.TestCase):
         with urllib.request.urlopen(request) as response:
             self.assertEqual(response.status, 200)
             self.assertIn("0 saved watch(es)", response.read().decode())
+
+    def test_resend_heartbeat_renders_saved_state_and_delivers_a_new_verified_batch_per_click(self):
+        rendered = []
+        deliveries = []
+
+        def render_saved():
+            rendered.append(True)
+            return "saved heartbeat only\r\n"
+
+        def deliver(text, batch_id):
+            deliveries.append((text, batch_id))
+            return [f"verified-{len(deliveries)}"]
+
+        server = self.portal.make_server(
+            state_path=self.state, lock_path=self.root / "lock-resend",
+            execute_fn=lambda *_a, **_k: self.fail("manager must not run for resend"),
+            port=0, csrf_path=self.root / "csrf-resend",
+            heartbeat_render_fn=render_saved, discord_deliver_fn=deliver)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
+        url = "http://" + f"127.0.0.1:{server.server_port}"
+        page = urllib.request.urlopen(url + "/").read().decode()
+        self.assertIn('value="resend_heartbeat"', page)
+        self.assertIn("Resend Heartbeat", page)
+        token = re.search(r'name="csrf" value="([^"]+)"', page)[1]
+
+        bodies = []
+        for _ in range(2):
+            request = urllib.request.Request(url + "/execute",
+                data=urllib.parse.urlencode({"csrf": token, "action": "resend_heartbeat"}).encode(),
+                headers={"Origin": url, "Content-Type": "application/x-www-form-urlencoded"})
+            with urllib.request.urlopen(request) as response:
+                bodies.append(html.unescape(response.read().decode()))
+
+        self.assertEqual(rendered, [True, True])
+        self.assertEqual([text for text, _batch in deliveries], ["saved heartbeat only\r\n"] * 2)
+        self.assertNotEqual(deliveries[0][1], deliveries[1][1])
+        self.assertTrue(all(batch.startswith("manual-rarity-heartbeat-resend-") for _text, batch in deliveries))
+        for index, body in enumerate(bodies, 1):
+            self.assertIn('"status": "delivered"', body)
+            self.assertIn(f'"verified_message_ids": [\n    "verified-{index}"', body)
+            self.assertIn('"marketplace_calls": 0', body)
+            self.assertIn('"monitor_refreshes": 0', body)
+            self.assertIn('"llm_tokens": 0', body)
+
+    def test_rarity_delivery_requires_configured_completion_watch_channel(self):
+        module_path = self.portal.HOME / "price-watches" / "rarity_watch_discord_delivery.py"
+        spec = importlib.util.spec_from_file_location("rarity_delivery_channel_test", module_path)
+        delivery = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(delivery)
+        self.assertEqual(delivery.EXPECTED_CHANNEL_NAME, "mtd-completion-watch")
+
+    def test_manual_runner_uses_hermes_venv_with_delivery_dependencies(self):
+        expected = self.portal.HOME / "hermes-agent" / "venv" / "Scripts" / "python.exe"
+        self.assertEqual(self.portal.RUNNER_PYTHON, expected)
+        self.assertTrue(self.portal.RUNNER_PYTHON.exists())
+        completed = __import__("subprocess").run(
+            [str(self.portal.RUNNER_PYTHON), "-c", "import dotenv"],
+            text=True, capture_output=True, timeout=20, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_update_buttons_use_deterministic_local_runner(self):
         started = []

@@ -13,13 +13,14 @@ from contextlib import contextmanager
 ROOT = Path(__file__).resolve().parent
 HERMES = ROOT.parent
 LEDGER = ROOT / "rarity-watch-onboarding-discord.json"
-EXPECTED_CHANNEL_NAME = "nft-price-watch-hermes"
+EXPECTED_CHANNEL_NAME = "mtd-completion-watch"
 
 
 def _channel_id() -> str:
     raw = json.loads((HERMES / "cron" / "jobs.json").read_text(encoding="utf-8"))
     jobs = raw.get("jobs", raw) if isinstance(raw, dict) else raw
-    matches = [job for job in jobs if job.get("script") == "run_mcfarlane_exotic_deterministic.py"
+    primary_scripts = {"run_mcfarlane_exotic_deterministic.py", "run_mcfarlane_exotic_scheduled.py"}
+    matches = [job for job in jobs if job.get("script") in primary_scripts
                and str(job.get("deliver", "")).startswith("discord:")]
     if len(matches) != 1:
         raise RuntimeError("Exotic Discord destination is not uniquely configured")

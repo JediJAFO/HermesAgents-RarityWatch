@@ -12,6 +12,7 @@ import secrets
 import subprocess
 import sys
 from typing import Any, Callable
+import uuid
 from urllib.parse import parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -22,6 +23,10 @@ CSRF_SECRET = HOME / "cache" / "rarity-watch-portal-csrf.key"
 UPDATE_STATUS = HOME / "price-watches" / "rarity-manual-update-status.json"
 UPDATE_LAUNCH_LOCK = HOME / "price-watches" / ".rarity-manual-update.lock"
 UPDATE_RUNNER = HOME / "scripts" / "run_rarity_update_and_heartbeat.py"
+RUNNER_PYTHON = HOME / "hermes-agent" / "venv" / "Scripts" / "python.exe"
+NODE = HOME / "node" / "node.exe"
+COLLECTOR = HOME / "price-watches" / "run_mcfarlane_exotic_deterministic.js"
+DISCORD_DELIVERY = HOME / "price-watches" / "rarity_watch_discord_delivery.py"
 MAX_REQUEST_BYTES = 20_000
 
 
@@ -71,7 +76,7 @@ def _start_runner(*, confirm_pending: bool = False) -> dict[str, Any]:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write("launching\n")
         subprocess_flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-        command = [sys.executable, str(UPDATE_RUNNER)]
+        command = [str(RUNNER_PYTHON), str(UPDATE_RUNNER)]
         if confirm_pending:
             command.append("--confirm-pending")
         process = subprocess.Popen(
@@ -97,12 +102,40 @@ def _start_confirmation() -> dict[str, Any]:
     return _start_runner(confirm_pending=True)
 
 
+def _render_saved_heartbeat() -> str:
+    result = subprocess.run(
+        [str(NODE), str(COLLECTOR), "--print-saved-heartbeat"],
+        text=True, capture_output=True, timeout=30, check=True)
+    return result.stdout
+
+
+def _deliver_discord(text: str, batch_id: str) -> list[str]:
+    spec = importlib.util.spec_from_file_location("rarity_portal_discord", DISCORD_DELIVERY)
+    delivery = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(delivery)
+    return delivery.Discord().deliver(text, batch_id)
+
+
+def _resend_heartbeat(heartbeat_render: Callable[[], str],
+                      discord_deliver: Callable[[str, str], list[str]]) -> dict[str, Any]:
+    text = heartbeat_render()
+    batch_id = "manual-rarity-heartbeat-resend-" + uuid.uuid4().hex
+    message_ids = discord_deliver(text, batch_id)
+    if not message_ids:
+        raise RuntimeError("heartbeat Discord resend was not verified")
+    return {"ok": True, "status": "delivered", "batch_id": batch_id,
+            "verified_message_ids": message_ids, "marketplace_calls": 0,
+            "monitor_refreshes": 0, "llm_tokens": 0}
+
+
 def make_server(*, state_path: Path = STATE, lock_path: Path = LOCK,
                 execute_fn: Callable[..., dict[str, Any]] = _manager_execute,
                 port: int = 8767, csrf_path: Path = CSRF_SECRET,
                 update_start_fn: Callable[[], dict[str, Any]] = _start_update,
                 confirmation_start_fn: Callable[[], dict[str, Any]] = _start_confirmation,
-                update_status_fn: Callable[[], dict[str, Any]] = _read_update_status) -> ThreadingHTTPServer:
+                update_status_fn: Callable[[], dict[str, Any]] = _read_update_status,
+                heartbeat_render_fn: Callable[[], str] = _render_saved_heartbeat,
+                discord_deliver_fn: Callable[[str, str], list[str]] = _deliver_discord) -> ThreadingHTTPServer:
     token = _persistent_csrf_token(csrf_path)
 
     class Handler(BaseHTTPRequestHandler):
@@ -115,12 +148,12 @@ def make_server(*, state_path: Path = STATE, lock_path: Path = LOCK,
         def page(self, result: str = "Ready. List Saved reads disk only; no marketplace calls or notifications.", code: int = 200) -> None:
             content = '''<!doctype html><html><head><meta charset="utf-8"><title>RARITY WATCH MANAGER</title><style>
 body{font:16px system-ui;max-width:900px;margin:0;padding:25px;background:#111827;color:#eee}input,select,button{font:inherit;padding:10px;border-radius:6px;border:1px solid #4b5563;background:#1f2937;color:#eee}label{display:grid;gap:5px}.grid{display:grid;grid-template-columns:2fr 1fr;gap:12px}.actions{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:16px 0}button{cursor:pointer}pre{white-space:pre-wrap;padding:12px;background:#1f2937;border:1px solid #374151;border-radius:6px}small{color:#9ca3af}@media(max-width:700px){.grid,.actions{grid-template-columns:1fr}}
-</style></head><body><h1>Exotic / Legendary Watch Manager</h1><p>Zero LLM tokens. Add completes only after the baseline is verified; it enables subsequent interval/8AM heartbeat coverage and posts a read-back-verified availability result to Discord. If Discord is temporarily unavailable, the watch remains enabled and the result is shown as pending for an exact retry. Disable, Remove, and List Saved are saved-state only: no marketplace calls and no notifications.</p>
+</style></head><body><h1>Exotic / Legendary Watch Manager</h1><p>Zero LLM tokens. Add completes only after the baseline is verified; it enables subsequent interval/9AM heartbeat coverage and posts a read-back-verified availability result to Discord. If Discord is temporarily unavailable, the watch remains enabled and the result is shown as pending for an exact retry. Disable, Remove, List Saved, and Resend Heartbeat are saved-state only: no marketplace calls or monitor refresh.</p>
 <form method="post" action="/execute"><input type="hidden" name="csrf" value="{token}"><div class="grid">
 <label>Polygon contract<input name="contract" placeholder="0x + 40 hexadecimal characters"></label>
 <label>Rarity<select name="rarity"><option value="Exotic">Exotic</option><option value="Legendary">Legendary</option><option value="Epic">Epic</option><option value="Rare">Rare</option></select></label>
 <label>Optional display name<input name="display"></label><label>Optional category<input name="category"></label></div>
-<div class="actions"><button name="action" value="add">Add (Live)</button><button name="action" value="disable">Disable</button><button name="action" value="remove">Remove</button><button name="action" value="list" formnovalidate>List Saved</button><button name="action" value="update" formnovalidate>Run Update + Heartbeat</button><button name="action" value="confirm_pending" formnovalidate>Confirm Pending Listings</button><button name="action" value="update_status" formnovalidate>Update Status</button></div></form>
+<div class="actions"><button name="action" value="add">Add (Live)</button><button name="action" value="disable">Disable</button><button name="action" value="remove">Remove</button><button name="action" value="list" formnovalidate>List Saved</button><button name="action" value="update" formnovalidate>Run Update + Heartbeat</button><button name="action" value="confirm_pending" formnovalidate>Confirm Pending Listings</button><button name="action" value="update_status" formnovalidate>Update Status</button><button name="action" value="resend_heartbeat" formnovalidate>Resend Heartbeat</button></div></form>
 <h2>Result</h2><pre id="result" aria-live="polite">{result}</pre></body></html>'''
             payload = content.replace("{token}", token).replace("{result}", html.escape(result)).encode()
             self.send_response(code)
@@ -145,10 +178,10 @@ body{font:16px system-ui;max-width:900px;margin:0;padding:25px;background:#11182
                     self.send_error(403)
                     return
                 action = data.get("action", [""])[0]
-                if action not in {"add", "disable", "remove", "list", "update", "confirm_pending", "update_status"}:
+                if action not in {"add", "disable", "remove", "list", "update", "confirm_pending", "update_status", "resend_heartbeat"}:
                     raise ValueError(f"unsupported action: {action}")
                 request = {"action": action}
-                if action not in {"list", "update", "confirm_pending", "update_status"}:
+                if action not in {"list", "update", "confirm_pending", "update_status", "resend_heartbeat"}:
                     contract = data.get("contract", [""])[0].strip()
                     rarity = data.get("rarity", [""])[0]
                     if not re.fullmatch(r"0x[0-9a-fA-F]{40}", contract):
@@ -167,6 +200,8 @@ body{font:16px system-ui;max-width:900px;margin:0;padding:25px;background:#11182
                     result = confirmation_start_fn()
                 elif action == "update_status":
                     result = update_status_fn()
+                elif action == "resend_heartbeat":
+                    result = _resend_heartbeat(heartbeat_render_fn, discord_deliver_fn)
                 else:
                     result = execute_fn(request, state_path=Path(state_path), lock_path=Path(lock_path))
                 if action == "list":

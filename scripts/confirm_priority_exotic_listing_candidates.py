@@ -2,18 +2,20 @@
 
 Reads saved state first. It invokes the normal deterministic collector only when an
 unconfirmed candidate adds a token absent from the prior verified baseline, or when
-a currently listed token's price falls by 10% or more in the same currency.
+a currently listed token's price falls in the same currency.
 Removals and non-discount price-only changes remain for the next main interval.
 """
 import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from exotic_execution_lock import BUSY, run_locked
 
 STATE = Path(r"__HERMES_HOME__/price-watches/mcfarlane-exotics.json")
 COLLECTOR = Path(r"__HERMES_HOME__/scripts/run_mcfarlane_exotic_deterministic.py")
+MIN_CONFIRMATION_AGE_SECONDS = 10.0
 
 
 def token_identity(listing: dict) -> str | None:
@@ -49,8 +51,8 @@ def is_priority_listing_candidate(collection: dict, fingerprint: str) -> bool:
     # A newly listed token is always purchase-priority.
     if set(candidate_by_id) - set(prior_by_id):
         return True
-    # For an existing listing, only a same-currency price cut of at least 10%
-    # is purchase-priority. Invalid/missing prices are deliberately ignored.
+    # Any same-currency price cut is purchase-priority. Invalid/missing prices
+    # are deliberately ignored.
     for identity, current in candidate_by_id.items():
         previous = prior_by_id.get(identity)
         if not previous or current.get("currency") != previous.get("currency"):
@@ -60,7 +62,7 @@ def is_priority_listing_candidate(collection: dict, fingerprint: str) -> bool:
             new_price = float(current["price"])
         except (KeyError, TypeError, ValueError):
             continue
-        if old_price > 0 and new_price <= old_price * 0.90:
+        if old_price > 0 and new_price < old_price:
             return True
     return False
 
@@ -79,6 +81,9 @@ def main() -> int:
     if not priority:
         # Empty stdout intentionally produces no delivery from this no-agent job.
         return 0
+    if time.time() - STATE.stat().st_mtime < MIN_CONFIRMATION_AGE_SECONDS:
+        # The every-minute scheduler will retry after the marketplace pacing gap.
+        return 0
     environment = os.environ.copy()
     environment["MCFARLANE_RUN_KIND"] = "confirmation"
     if len(priority_keys) == len(priority):
@@ -89,7 +94,23 @@ def main() -> int:
     return result.returncode
 
 
+def priority_work_due() -> bool:
+    state = json.loads(STATE.read_text(encoding="utf-8"))
+    candidates = state.get("pending_exotic_change_candidates") or {}
+    has_priority = any(
+        (collection.get("watch_key") or collection.get("name")) in candidates
+        and is_priority_listing_candidate(
+            collection, candidates[collection.get("watch_key") or collection.get("name")])
+        for collection in state.get("collections") or []
+    )
+    return has_priority and time.time() - STATE.stat().st_mtime >= MIN_CONFIRMATION_AGE_SECONDS
+
+
 def cron_entry() -> int:
+    # Avoid touching the shared marketplace lease on the normal no-work path.
+    # main() re-reads state after acquisition so a stale preflight cannot act.
+    if not priority_work_due():
+        return 0
     # A primary collector may still own the shared browser/state lease at the
     # confirmation minute. That is an intentional deferral, not an error.
     result = run_locked(main)

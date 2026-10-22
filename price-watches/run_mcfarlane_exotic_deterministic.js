@@ -8,6 +8,7 @@ const whatsappPolicy = require(path.join(ROOT, 'exotic_whatsapp_policy.js'));
 const STATE = path.join(ROOT, 'mcfarlane-exotics.json');
 const RUN = path.join(ROOT, 'mcfarlane-deterministic-run.json');
 const ALIASES = path.join(ROOT, 'mcfarlane-wallet-aliases.json');
+const BLOCK_DIAGNOSTICS = path.join(ROOT, 'marketplace-block-diagnostics');
 const CDP = 'http://127.0.0.1:9222';
 const RARIBLE_API = 'https://api.rarible.org/v0.1/orders/sell/byItem';
 const GAP_MS = 10000; // User-required minimum pacing between marketplace navigations.
@@ -23,6 +24,28 @@ function executionBudget(selectedCount) {
 const ET = new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+function isLocalCdpHandshakeTimeout(error) {
+  const text = String(error?.message || error || '');
+  return /connectOverCDP/i.test(text)
+    && /Timeout\s+\d+ms\s+exceeded/i.test(text)
+    && /(?:127\.0\.0\.1|\[?::1\]?):9222/i.test(text);
+}
+function boundedCleanup(action, timeoutMs = 5000) {
+  // Playwright cleanup can itself hang after a shared network failure. Never
+  // let cleanup consume the wrapper's remaining batch timeout.
+  return new Promise(resolve => {
+    let finished = false, timer;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      if (timer !== undefined && typeof clearTimeout === 'function') clearTimeout(timer);
+      resolve();
+    };
+    timer = setTimeout(finish, timeoutMs);
+    timer?.unref?.();
+    Promise.resolve().then(action).catch(() => {}).then(finish);
+  });
+}
 const SUPPORTED_RARITIES = new Set(['Exotic', 'Legendary', 'Epic', 'Rare']);
 function isSupportedRarity(rarity) { return SUPPORTED_RARITIES.has(rarity); }
 function watchKey(collection) {
@@ -87,6 +110,9 @@ function sameFilteredUrl(actual, expected) {
 function certificateAuthorityError(error) {
   return /\bERR_CERT_AUTHORITY_INVALID\b/.test(String(error?.message || error));
 }
+function marketplaceConnectionRefused(error) {
+  return /\bERR_CONNECTION_REFUSED\b/.test(String(error?.message || error));
+}
 async function certificatePreflight(page) {
   // Use the same validating, dedicated CDP browser as collection, never a bypass.
   const url = 'https://mcfarlanetoys.digital/';
@@ -94,13 +120,103 @@ async function certificatePreflight(page) {
     const response = await page.goto(url, {waitUntil: 'commit', timeout: 25000});
     return {kind: response && new URL(response.url()).origin === new URL(url).origin ? 'VERIFIED' : 'UNAVAILABLE', url};
   } catch (error) {
-    return {kind: certificateAuthorityError(error) ? 'CERTIFICATE_FAILURE' : 'UNAVAILABLE',
+    const kind = certificateAuthorityError(error) ? 'CERTIFICATE_FAILURE'
+      : marketplaceConnectionRefused(error) ? 'SHARED_FAILURE' : 'UNAVAILABLE';
+    return {kind, code: kind === 'SHARED_FAILURE' ? 'marketplace_connection_refused' : undefined,
       url, reason: String(error.stack || error.message || error)};
   }
 }
-function explicitBlock(text) {
-  const t = text.toLowerCase();
-  return /\b429\b|captcha|challenge|access denied|you have been blocked|temporarily blocked/.test(t);
+const BLOCK_SIGNALS = [
+  ['captcha', /captcha/i],
+  ['security challenge', /\b(?:security|browser|verification)\s+challenge\b|checking your browser|verify (?:that )?you are human|challenge-platform|cf-chl/i],
+  ['access denied', /access denied/i],
+  ['you have been blocked', /you have been blocked/i],
+  ['temporarily blocked', /temporarily blocked/i],
+];
+function sanitizeDiagnosticText(text) {
+  return String(text || '')
+    .replace(/0x[0-9a-f]{40}\b/gi, '0x…redacted')
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email redacted]')
+    .replace(/\s+/g, ' ').trim();
+}
+function blockEvidence(text, httpStatus = null) {
+  if (Number(httpStatus) === 429) {
+    return {matched_signal:'http 429', excerpt:'HTTP response status 429'};
+  }
+  const source = String(text || '');
+  for (const [matched_signal, pattern] of BLOCK_SIGNALS) {
+    const match = pattern.exec(source);
+    if (!match) continue;
+    const start = Math.max(0, match.index - 180);
+    const end = Math.min(source.length, match.index + match[0].length + 220);
+    return {matched_signal, excerpt: sanitizeDiagnosticText(source.slice(start, end)).slice(0, 500)};
+  }
+  return null;
+}
+function explicitBlock(text, httpStatus = null) { return Boolean(blockEvidence(text, httpStatus)); }
+function safeDiagnosticUrl(raw) {
+  try { const url = new URL(raw); return `${url.origin}${url.pathname}`; }
+  catch { return ''; }
+}
+function diagnosticFilePart(value) {
+  return String(value || 'unknown').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'unknown';
+}
+function pruneBlockDiagnostics(dir, keep = 20) {
+  let details = [];
+  try {
+    details = fs.readdirSync(dir).filter(name => name.endsWith('.json'))
+      .map(name => ({name, mtime:fs.statSync(path.join(dir, name)).mtimeMs}))
+      .sort((a,b) => b.mtime - a.mtime);
+  } catch { return; }
+  for (const old of details.slice(keep)) {
+    try {
+      const detailPath = path.join(dir, old.name);
+      const detail = JSON.parse(fs.readFileSync(detailPath, 'utf8'));
+      if (detail.screenshot_file) fs.rmSync(path.join(dir, path.basename(detail.screenshot_file)), {force:true});
+      fs.rmSync(detailPath, {force:true});
+    } catch {}
+  }
+}
+async function captureBlockDiagnostic(page, response, evidence, stage, collection, dir = BLOCK_DIAGNOSTICS) {
+  fs.mkdirSync(dir, {recursive:true});
+  const id = `${new Date().toISOString().replace(/[:.]/g,'-')}-${process.pid}-${diagnosticFilePart(stage)}-${diagnosticFilePart(collection?.name)}`;
+  const screenshotFile = `${id}.png`;
+  const detailFile = `${id}.json`;
+  let screenshotSaved = false, screenshotError = null;
+  try {
+    // This run stops after a block, so masking the diagnostic tab cannot affect
+    // a later observation. Never persist wallets, emails, or entered form data.
+    await page.evaluate(() => {
+      const redact = value => String(value || '')
+        .replace(/0x[0-9a-f]{40}\b/gi, '0x…redacted')
+        .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email redacted]');
+      const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) node.nodeValue = redact(node.nodeValue);
+      for (const input of document.querySelectorAll('input, textarea')) input.value = '';
+    });
+    await page.screenshot({path:path.join(dir, screenshotFile), fullPage:false, timeout:10000});
+    screenshotSaved = true;
+  } catch (error) { screenshotError = String(error?.message || error).slice(0, 180); }
+  let title = '';
+  try { title = sanitizeDiagnosticText(await page.title()).slice(0, 200); } catch {}
+  let httpStatus = null;
+  try { httpStatus = Number(response?.status?.()); } catch {}
+  if (!Number.isFinite(httpStatus)) httpStatus = null;
+  const diagnostic = {
+    detected_at: now(), stage,
+    matched_signal: evidence.matched_signal,
+    excerpt: sanitizeDiagnosticText(evidence.excerpt).slice(0, 500),
+    http_status: httpStatus,
+    page_title: title,
+    page_url: safeDiagnosticUrl(page.url?.()),
+    collection: sanitizeDiagnosticText(collection?.name).slice(0, 120),
+    rarity: collection?.rarity || 'Exotic',
+    detail_file: detailFile,
+    ...(screenshotSaved ? {screenshot_file:screenshotFile} : {screenshot_error:screenshotError || 'screenshot unavailable'}),
+  };
+  atomicJson(path.join(dir, detailFile), diagnostic);
+  pruneBlockDiagnostics(dir);
+  return diagnostic;
 }
 function priceFrom(text) {
   const m = text.replace(/\u00a0/g, ' ').match(/([\d,]+(?:\.\d+)?)\s*(POLYGON|MATIC|POL)\b/i);
@@ -147,10 +263,14 @@ function ownerFromProductText(text) {
   const masked = text.match(/(?:owned\s+by|owner)[\s\S]{0,80}?(?:\.\.\.|…)([a-f0-9]{4,9})\b/i);
   return masked ? { display: `...${masked[1].toLowerCase()}` } : null;
 }
-async function extractObservation(page, collection) {
+async function extractObservation(page, collection, response, captureDiagnostic = captureBlockDiagnostic) {
   const actualUrl = page.url();
   const body = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
-  if (explicitBlock(body)) return { kind: 'GLOBAL_BLOCK', reason: 'explicit marketplace block evidence' };
+  let status = null;
+  try { status = response?.status?.(); } catch {}
+  const block = blockEvidence(body, status);
+  if (block) return { kind: 'GLOBAL_BLOCK', reason: 'explicit marketplace block evidence',
+    block_diagnostic: await captureDiagnostic(page, response, block, 'collection', collection) };
   if (!sameFilteredUrl(actualUrl, collection.source_url)) return { kind: 'UNAVAILABLE', reason: 'unexpected filtered-URL redirect', actual_url: actualUrl };
 
   // The current storefront omits the visible filter-control widgets even when
@@ -205,10 +325,14 @@ async function verifyRarityTraits(page, listings, deadlineAt, rarity) {
     // navigation, so it receives the same measured cooldown as collection URLs.
     await sleep(GAP_MS);
     try {
-      await page.goto(listing.url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+      const response = await page.goto(listing.url, { waitUntil: 'domcontentloaded', timeout: 25000 });
       await sleep(LOAD_SETTLE_MS);
       const text = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
-      if (explicitBlock(text)) return { ok: false, global: true, reason: 'explicit marketplace block evidence on product page' };
+      let status = null;
+      try { status = response?.status?.(); } catch {}
+      const block = blockEvidence(text, status);
+      if (block) return { ok: false, global: true, reason: 'explicit marketplace block evidence on product page',
+        block_diagnostic: await captureBlockDiagnostic(page, response, block, 'product', {name:listing.name, rarity}) };
       if (!sameFilteredUrl(page.url(), listing.url)) return { ok: false, reason: `unexpected product URL for token ${listing.token_id}` };
       const productText = productTextBeforeRecommendations(text);
       if (/\bOPEN FOR BIDS\b/i.test(productText)) continue;
@@ -264,14 +388,14 @@ async function observeWithRetries(page, collection, waitBeforeNav, deadlineAt, r
     if (needsGap) await sleep(GAP_MS);
     try {
       if (page.isClosed?.() && recoverPage) page = await recoverPage(deadlineAt);
-      await page.goto(collection.source_url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+      const response = await page.goto(collection.source_url, { waitUntil: 'domcontentloaded', timeout: 25000 });
       await sleep(LOAD_SETTLE_MS);
-      const result = await extractObservation(page, collection);
+      const result = await extractObservation(page, collection, response);
       result.attempts = attempt;
       if (result.kind === 'GLOBAL_BLOCK') return result;
       if (result.kind === 'VERIFIED') {
         const traits = await verifyRarityTraits(page, result.baseline.listings, deadlineAt, collection.rarity || 'Exotic');
-        if (traits.global) return { kind: 'GLOBAL_BLOCK', reason: traits.reason, attempts: attempt };
+        if (traits.global) return { kind: 'GLOBAL_BLOCK', reason: traits.reason, attempts: attempt, block_diagnostic:traits.block_diagnostic };
         if (traits.ok) {
           result.baseline.listing_count = result.baseline.listings.length;
           result.baseline.for_sale = result.baseline.listings.length > 0;
@@ -371,7 +495,7 @@ function dailyHeartbeatDate(state, outcome) {
   const instant = new Date(occurrence.scheduled_at);
   if (!Number.isFinite(instant.getTime())) return null;
   const p = Object.fromEntries(ET.formatToParts(instant).map(x => [x.type,x.value]));
-  if (p.hour !== '08' || p.minute !== '00' || p.second !== '00') return null;
+  if (p.hour !== '09' || p.minute !== '00' || p.second !== '00') return null;
   const date = `${p.year}-${p.month}-${p.day}`;
   return state.discord_daily_heartbeat?.date >= date ? null : date;
 }
@@ -402,7 +526,7 @@ function heartbeatReport(state, outcome = {}) {
   const aliases = heartbeatAliases(state.collections);
   const rate = Number(state.current_pol_usd?.rate);
   const validRate = Number.isFinite(rate) && rate > 0;
-  const lines = [outcome.saved_preview ? '**8AM ET Exotic listings — saved preview**' : '**8AM ET Exotic listings**'];
+  const lines = [outcome.saved_preview ? '**9AM ET Exotic listings — saved preview**' : '**9AM ET Exotic listings**'];
   if (outcome.complete === false) {
     lines.push('Partial check — saved last-known-good listings; not all listings reverified.');
     const unresolved = (outcome.failed_collections || []).map(x => aliases.get(x.name) || x.name.replace(/\s+/g,' '));
@@ -428,7 +552,7 @@ function heartbeatReport(state, outcome = {}) {
       const wallet = String(listing.seller_wallet || '').trim();
       const sellerLabel = seller && !/0x[0-9a-f]{40}/i.test(seller)
         ? seller : (wallet ? `...${wallet.slice(-4)}` : 'Seller not recorded');
-      lines.push(`• ${rarityLabel(c)} ${aliases.get(c.name)} — ${price}${usdMissing ? ' (USD unavailable)' : ''} — ${sellerLabel}`);
+      lines.push(`• ${price}${usdMissing ? ' (USD unavailable)' : ''} — ${rarityLabel(c)} ${aliases.get(c.name)} — ${sellerLabel}`);
   }
   if (!lines.some(x => x.startsWith('•'))) lines.push('No active listings in saved verified state.');
   return lines.join('\r\n') + '\r\n';
@@ -436,6 +560,13 @@ function heartbeatReport(state, outcome = {}) {
 function report(state, outcome) {
   if (outcome.shared_failure === 'certificate_authority_invalid') {
     return 'McFarlane Exotic Watch — HTTPS certificate validation failed; listings unavailable. All last-known-good listings retained. Will check again at the next primary interval.\r\n';
+  }
+  if (outcome.shared_failure === 'marketplace_connection_refused') {
+    return '**McFarlane Rarity Watch — marketplace connection unavailable**\r\nAll watches were left unchanged; last-known-good data retained. Technical retry remains eligible.\r\n';
+  }
+  if (outcome.shared_failure === 'local_browser_cdp_timeout') {
+    const failures = outcome.failed_collections || [];
+    return `**McFarlane Rarity Watch — browser unavailable**\r\n${failures.length} watches were not checked; last-known-good data retained. Browser recovery and technical retry are eligible.\r\nLast complete check: ${state.last_successful_monitor_run || '—'}\r\n`;
   }
   const failures = outcome.failed_collections || [];
   const sharedBrowserUnavailable = failures.length > 0
@@ -454,7 +585,8 @@ function report(state, outcome) {
     lines.push(`Partial check — ${outcome.failed_collections.map(x => `**[${x.rarity || 'Exotic'}] ${x.name}** (${x.type})`).join('; ')}. Last-known-good rows were retained.`);
     lines.push('');
   }
-  lines.push(changedKeys.size ? 'Changes detected —' : (outcome.complete === false ? '**McFarlane Rarity Watch — no confirmed changes**' : '**McFarlane Rarity Watch — no changes**'));
+  const confirmedPriority = changedKeys.size && outcome.run_kind === 'confirmation';
+  lines.push(confirmedPriority ? '**Confirmed new/lower-priced listing —**' : (changedKeys.size ? 'Changes detected —' : (outcome.complete === false ? '**McFarlane Rarity Watch — no confirmed changes**' : '**McFarlane Rarity Watch — no changes**')));
   lines.push(`Last complete check: ${state.last_successful_monitor_run || '—'}`);
   lines.push('');
   const rows = state.collections.filter(c => c.baseline && changedKeys.has(c.watch_key || watchKey(c)));
@@ -463,7 +595,7 @@ function report(state, outcome) {
     const removed = (outcome.discord_changes || []).filter(x => (x.watch_key || watchKey(x)) === (c.watch_key || watchKey(c))).flatMap(x => x.removed_listings || []);
     const removalText = removed.length ? ` Removed ${removed.length} ${c.rarity} listing(s) (previously ${removed.map(x => `${listingPriceText(x, state)} by ${sellerText(x)}`).join(', ')}).` : '';
     const history = c.rarity === 'Exotic' ? `; last: ${saleText(c)}` : '';
-    if (b.for_sale) lines.push(`• **${rarityLabel(c)} ${c.name}** — **🟢 YES**; ${b.listing_count} listing(s); **${listingDetails(c, state)}**${history}; [View](<${c.source_url}>)${removalText}`);
+    if (b.for_sale) lines.push(`• **${rarityLabel(c)} ${c.name}** — **🟢 YES**; ${b.listing_count} listing(s); **${listingDetails(c, state)}**${history}; [View marketplace](<${c.source_url}>)${removalText}`);
     else lines.push(`• **${rarityLabel(c)} ${c.name}** — No; 0 listing(s); —${history}${removalText}`);
   }
   return lines.join('\r\n') + '\r\n';
@@ -522,16 +654,43 @@ function recordPartialDeliveryPolicy(state, outcome) {
   if (prior) delete state.partial_discord_notice;
   return true;
 }
+function updateInheritedLockOwner(lockPath, token, active) {
+  const ownerPath = path.join(lockPath, 'owner.json');
+  const mutationPath = path.join(lockPath, '.owner-mutation');
+  try { fs.mkdirSync(mutationPath); }
+  catch { return false; }
+  try {
+    const owner = JSON.parse(fs.readFileSync(ownerPath, 'utf8'));
+    if (!token || owner.token !== token) return false;
+    if (active) {
+      owner.active_pid = process.pid;
+      owner.heartbeat_at = Date.now() / 1000;
+    } else if (owner.active_pid === process.pid) {
+      delete owner.active_pid;
+      delete owner.heartbeat_at;
+    } else return false;
+    const temporary = `${ownerPath}.${process.pid}.tmp`;
+    fs.writeFileSync(temporary, JSON.stringify(owner), 'utf8');
+    fs.renameSync(temporary, ownerPath);
+    return true;
+  } catch { return false; }
+  finally { try { fs.rmdirSync(mutationPath); } catch {} }
+}
 function acquireExecutionLock(lockPath = path.join(ROOT, '.exotic-execution-lock')) {
   const token = process.env.MCFARLANE_EXOTIC_LOCK_TOKEN;
   try {
     const owner = JSON.parse(fs.readFileSync(path.join(lockPath, 'owner.json'), 'utf8'));
-    if (token && token === owner.token) return () => {};
+    if (token && token === owner.token) {
+      if (!updateInheritedLockOwner(lockPath, token, true)) return null;
+      return () => { updateInheritedLockOwner(lockPath, token, false); };
+    }
   } catch {}
   try { fs.mkdirSync(lockPath); }
   catch (error) { if (error.code === 'EEXIST') return null; throw error; }
   try {
-    fs.writeFileSync(path.join(lockPath, 'owner.json'), JSON.stringify({pid: process.pid, token: require('crypto').randomBytes(24).toString('hex')}));
+    fs.writeFileSync(path.join(lockPath, 'owner.json'), JSON.stringify({
+      pid: process.pid, token: require('crypto').randomBytes(24).toString('hex'), acquired_at: Date.now() / 1000,
+    }));
   } catch (error) { fs.rmdirSync(lockPath); throw error; }
   // Do not time-expire another process's lease. Hard kills deliberately fail closed.
   return () => { fs.unlinkSync(path.join(lockPath, 'owner.json')); fs.rmdirSync(lockPath); };
@@ -610,7 +769,7 @@ async function collectMain() {
   const rawState = JSON.parse(fs.readFileSync(STATE, 'utf8'));
   const state = migrateWatchState(rawState);
   if (canonical(rawState) !== canonical(state)) atomicJson(STATE, state);
-  const run = { at: now(), collector: 'deterministic-playwright-cdp-v1', results: [], global_stop: false };
+  const run = { at: now(), collector: 'deterministic-playwright-cdp-v1', run_kind: process.env.MCFARLANE_RUN_KIND || 'primary', results: [], global_stop: false };
   let browser, page, lastNavigation = false;
   const requestedNames = new Set((process.env.MCFARLANE_COLLECTION_NAMES || '').split('|').map(x => x.trim()).filter(Boolean));
   const requestedKeys = new Set((process.env.MCFARLANE_WATCH_KEYS || '').split('|,|').map(x => x.trim()).filter(Boolean));
@@ -620,7 +779,7 @@ async function collectMain() {
   run.scope = !requestedNames.size && !requestedKeys.size && !process.env.MCFARLANE_RUN_KIND && selectedCollections.length === state.collections.filter(c => c.enabled !== false).length ? 'full' : 'targeted';
   if (run.scope === 'full') state.last_primary_exotic_run_id = require('crypto').randomUUID();
   armDailyHeartbeat(state, run);
-  // Persist debt before CDP/startup: a thrown connection cannot erase the 8AM occurrence.
+  // Persist debt before CDP/startup: a thrown connection cannot erase the 9AM occurrence.
   atomicJson(STATE, state);
   const selectedKeys = new Set(selectedCollections.map(c => c.watch_key || watchKey(c)));
   const outstanding = run.scope === 'targeted'
@@ -644,11 +803,14 @@ async function collectMain() {
     };
 
     run.preflight = await certificatePreflight(page);
+    if (run.preflight.kind !== 'CERTIFICATE_FAILURE') delete state.shared_certificate_failure;
     lastNavigation = true; // First collection must also observe the 10-second gap.
-    if (run.preflight.kind === 'CERTIFICATE_FAILURE') {
-      run.shared_failure = 'certificate_authority_invalid';
+    if (run.preflight.kind === 'CERTIFICATE_FAILURE' || run.preflight.kind === 'SHARED_FAILURE') {
+      run.shared_failure = run.preflight.kind === 'CERTIFICATE_FAILURE'
+        ? 'certificate_authority_invalid' : run.preflight.code;
       run.global_stop = true;
-      run.global_reason = run.preflight.reason;
+      run.global_reason = run.preflight.kind === 'CERTIFICATE_FAILURE'
+        ? run.preflight.reason : 'marketplace preflight connection refused';
       run.results = selectedCollections.map(c => ({name:c.name, contract:c.contract, rarity:c.rarity, watch_key:c.watch_key, kind:'UNAVAILABLE', reason:run.global_reason, attempts:0}));
     }
     for (const collection of run.global_stop ? [] : selectedCollections) {
@@ -662,22 +824,37 @@ async function collectMain() {
       run.results.push({ name: collection.name, contract:collection.contract, rarity:collection.rarity, watch_key:collection.watch_key, ...result });
       // Persist progress so an interrupted diagnostic has useful evidence.
       atomicJson(RUN, run);
-      if (result.kind === 'GLOBAL_BLOCK') { run.global_stop = true; run.global_reason = result.reason; break; }
+      if (result.kind === 'GLOBAL_BLOCK') {
+        run.global_stop = true;
+        run.global_reason = result.reason;
+        if (result.block_diagnostic) run.block_diagnostic = result.block_diagnostic;
+        break;
+      }
     }
   } catch (error) {
     run.fatal_error = String(error.message || error).slice(0, 300);
+    if (isLocalCdpHandshakeTimeout(error)) {
+      run.shared_failure = 'local_browser_cdp_timeout';
+      run.global_stop = true;
+      run.global_reason = 'local browser CDP handshake timed out';
+    }
   } finally {
-    if (page) await page.close().catch(() => {});
-    if (browser) await browser.close().catch(() => {});
+    await Promise.all([
+      page ? boundedCleanup(() => page.close()) : Promise.resolve(),
+      browser ? boundedCleanup(() => browser.close()) : Promise.resolve(),
+    ]);
   }
   atomicJson(RUN, run);
   if (run.global_stop || run.fatal_error || run.results.length !== selectedCollections.length) {
     const reason = run.global_reason || run.fatal_error || 'incomplete deterministic result set';
-    const outcome = { at: run.at, complete: false, changed: false, scope: run.scope, failed_collections: [...outstanding, ...selectedCollections.map(c => ({ name: c.name, contract:c.contract, rarity:c.rarity, watch_key:c.watch_key, type: reason }))] };
+    const outcome = { at: run.at, complete: false, changed: false, scope: run.scope, run_kind: run.run_kind, failed_collections: [...outstanding, ...selectedCollections.map(c => ({ name: c.name, contract:c.contract, rarity:c.rarity, watch_key:c.watch_key, type: reason }))],
+      ...(run.block_diagnostic ? {block_diagnostic:run.block_diagnostic} : {}) };
     if (run.shared_failure) {
       outcome.shared_failure = run.shared_failure;
-      state.shared_certificate_failure = {code:run.shared_failure, at:run.at, detail:reason};
-      delete state.automatic_exotic_retry_state;
+      if (run.shared_failure === 'certificate_authority_invalid') {
+        state.shared_certificate_failure = {code:run.shared_failure, at:run.at, detail:reason};
+        delete state.automatic_exotic_retry_state;
+      }
     }
     state.last_monitor_outcome = outcome;
     const deliver = recordPartialDeliveryPolicy(state, outcome);
@@ -714,7 +891,7 @@ async function collectMain() {
       // and makes a transient card/render defect incapable of alerting.
       if (candidates[key] === candidateFingerprint) {
         changed.push(key);
-        whatsappChanges.push(...whatsappPolicy.confirmedEvents(`${rarityLabel(collection)} ${collection.name}`, prior, stableBaseline, run.at));
+        whatsappChanges.push(...whatsappPolicy.confirmedEvents(collection, prior, stableBaseline, run.at));
         const currentTokens = new Set(stableBaseline.listings.map(x => String(x.token_id)));
         discordChanges.push({ name: collection.name, contract:collection.contract, rarity:collection.rarity, watch_key:key, at: run.at,
           removed_listings: (prior.listings || []).filter(x => !currentTokens.has(String(x.token_id))) });
@@ -733,7 +910,7 @@ async function collectMain() {
     collection.last_successful_observation = run.at;
   }
   state.pending_exotic_change_candidates = candidates;
-  const outcome = { at: run.at, complete: failures.length === 0, changed: changed.length > 0, scope: run.scope, failed_collections: failures, collector: run.collector, discord_changes: discordChanges };
+  const outcome = { at: run.at, complete: failures.length === 0, changed: changed.length > 0, scope: run.scope, run_kind: run.run_kind, failed_collections: failures, collector: run.collector, discord_changes: discordChanges };
   state.last_monitor_outcome = outcome;
   const deliver = recordPartialDeliveryPolicy(state, outcome);
   if (outcome.complete && run.scope === 'full') state.last_successful_monitor_run = run.at;

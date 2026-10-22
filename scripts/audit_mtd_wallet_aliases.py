@@ -24,9 +24,18 @@ def load(root, name):
 def audit(root=ROOT, include_full=False):
     root = Path(root)
     aliases = load(root, 'mcfarlane-wallet-aliases.json')
-    exact = {address(k): v for k, v in aliases.get('exact_aliases', {}).items()
-             if address(k) and isinstance(v, str) and v.strip()}
-    masked = aliases.get('masked_aliases', [])
+    canonical = aliases.get('aliases', [])
+    exact = {address(row.get('wallet')): row.get('alias') for row in canonical
+             if isinstance(row, dict) and address(row.get('wallet'))
+             and isinstance(row.get('alias'), str) and row.get('alias').strip()}
+    for wallet, name in aliases.get('exact_aliases', {}).items():
+        normalized = address(wallet)
+        if normalized and isinstance(name, str) and name.strip():
+            exact.setdefault(normalized, name.strip())
+    masked = [
+        {'prefix': row.get('masked_prefix'), 'suffix': row.get('masked_suffix'), 'name_tag': row.get('alias')}
+        for row in canonical if isinstance(row, dict) and not row.get('wallet')]
+    masked.extend(aliases.get('masked_aliases', []))
     holder = load(root, 'holder-activity-state.json')
     for wallet, name in holder.get('aliases', {}).items():
         normalized = address(wallet)

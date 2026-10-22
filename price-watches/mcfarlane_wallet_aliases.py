@@ -7,6 +7,80 @@ ALIASES = Path(r"__HERMES_HOME__/price-watches/mcfarlane-wallet-aliases.json")
 DISPLAY_SUFFIX_LENGTH = 9
 
 
+def normalize_wallet(wallet: object) -> str | None:
+    if not isinstance(wallet, str) or not wallet.strip():
+        return None
+    normalized = wallet.split(":", 1)[-1].lower().strip()
+    if not normalized.startswith("0x") or len(normalized) != 42:
+        return None
+    return normalized
+
+
+def alias_for_wallet(wallet: object, aliases: dict | None = None) -> str | None:
+    """Resolve schema-3 canonical aliases first, then legacy views."""
+    normalized = normalize_wallet(wallet)
+    if not normalized:
+        return None
+    if aliases is None:
+        try:
+            aliases = json.loads(ALIASES.read_text(encoding="utf-8"))
+        except Exception:
+            aliases = {}
+    canonical = aliases.get("aliases", []) if isinstance(aliases, dict) else []
+    exact_matches = {
+        row.get("alias") for row in canonical
+        if isinstance(row, dict)
+        and isinstance(row.get("wallet"), str)
+        and row["wallet"].lower() == normalized
+        and isinstance(row.get("alias"), str)
+        and row.get("alias").strip()
+    }
+    if len(exact_matches) == 1:
+        return next(iter(exact_matches))
+    if len(exact_matches) > 1:
+        return None
+    exact = aliases.get("exact_aliases", {}) if isinstance(aliases, dict) else {}
+    if isinstance(exact, dict):
+        for address, alias in exact.items():
+            if str(address).lower() == normalized and isinstance(alias, str) and alias.strip():
+                return alias.strip()
+    direct = aliases.get(normalized) if isinstance(aliases, dict) else None
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+    canonical_masks = {
+        row.get("alias") for row in canonical
+        if isinstance(row, dict) and not row.get("wallet")
+        and isinstance(row.get("masked_prefix"), str)
+        and isinstance(row.get("masked_suffix"), str)
+        and normalized.startswith(row["masked_prefix"].lower())
+        and normalized.endswith(row["masked_suffix"].lower())
+        and isinstance(row.get("alias"), str) and row.get("alias").strip()
+    }
+    if len(canonical_masks) == 1:
+        return next(iter(canonical_masks))
+    if len(canonical_masks) > 1:
+        return None
+    legacy_masks = {
+        row.get("alias", row.get("name_tag"))
+        for row in aliases.get("masked_aliases", [])
+        if isinstance(row, dict)
+        and isinstance(row.get("masked_prefix", row.get("prefix")), str)
+        and isinstance(row.get("masked_suffix", row.get("suffix")), str)
+        and normalized.startswith(row.get("masked_prefix", row.get("prefix")).lower())
+        and normalized.endswith(row.get("masked_suffix", row.get("suffix")).lower())
+        and isinstance(row.get("alias", row.get("name_tag")), str)
+        and row.get("alias", row.get("name_tag")).strip()
+    }
+    return next(iter(legacy_masks)) if len(legacy_masks) == 1 else None
+
+
+def wallet_label(wallet: object, aliases: dict | None = None, missing: str = "Buyer not recorded") -> str:
+    normalized = normalize_wallet(wallet)
+    if not normalized:
+        return missing
+    return alias_for_wallet(normalized, aliases) or "..." + normalized[-DISPLAY_SUFFIX_LENGTH:]
+
+
 def wallet_display(wallet: object) -> str:
     """Render an unmatched wallet as an ellipsis plus a fixed suffix only."""
     if not isinstance(wallet, str) or not wallet.strip():
@@ -15,29 +89,14 @@ def wallet_display(wallet: object) -> str:
     return "..." + normalized[-DISPLAY_SUFFIX_LENGTH:]
 
 
-def resolve_buyer(wallet: object) -> dict:
+def resolve_buyer(wallet: object, aliases: dict | None = None) -> dict:
     """Keep the raw normalized wallet and a Name Tag only when unique."""
     if not isinstance(wallet, str) or not wallet.strip():
         return {"buyer_wallet": None, "buyer_name_tag": None}
-    normalized = wallet.split(":", 1)[-1].lower().strip()
-    try:
-        aliases = json.loads(ALIASES.read_text(encoding="utf-8"))
-    except Exception:
-        return {"buyer_wallet": normalized, "buyer_name_tag": None}
-    exact = aliases.get("exact_aliases", {})
-    if isinstance(exact, dict) and isinstance(exact.get(normalized), str):
-        return {"buyer_wallet": normalized, "buyer_name_tag": exact[normalized]}
-    matches = [
-        entry.get("name_tag")
-        for entry in aliases.get("masked_aliases", [])
-        if isinstance(entry, dict)
-        and isinstance(entry.get("prefix"), str)
-        and isinstance(entry.get("suffix"), str)
-        and normalized.startswith(entry["prefix"].lower())
-        and normalized.endswith(entry["suffix"].lower())
-        and isinstance(entry.get("name_tag"), str)
-    ]
-    return {"buyer_wallet": normalized, "buyer_name_tag": matches[0] if len(matches) == 1 else None}
+    normalized = normalize_wallet(wallet)
+    if not normalized:
+        return {"buyer_wallet": None, "buyer_name_tag": None}
+    return {"buyer_wallet": normalized, "buyer_name_tag": alias_for_wallet(normalized, aliases)}
 
 
 def party_label(record: dict | None, party: str) -> str:

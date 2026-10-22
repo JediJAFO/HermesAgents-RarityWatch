@@ -1,72 +1,84 @@
-# Product Requirements Document — McFarlane Exotic Watch
+# Product Requirements Document — McFarlane Rarity Watch
 
-**Version:** 4.0
-**Agent source audit:** 2026-09-16; local code and recurring configuration only, no human approval, live collection or delivery test implied.
-**Status:** Active implementation; deployment and delivery caveats below.
-**Private state:** HERMES_HOME/price-watches/mcfarlane-exotics.json (not backed up).
+**Compatibility filename:** `McFarlane_Exotic_Watch_PRD.md`  
+**Review date:** 2026-10-22  
+**Status:** Active deterministic implementation with current backup defects.  
+**Verification boundary:** Reviewed local source, private state aggregates, `jobs.json`, and local execution records. Offline Python tests and the bundled-Node collector test were run. No marketplace request, browser collection, Discord/WhatsApp post, backup push, or live delivery read-back was performed for this review.
 
-## Purpose and current scope
+## 1. Purpose and current scope
 
-Monitor 23 preserved privately configured Exotic watches plus future Exotic or Legendary watches for verified BUY NOW listings with an exact product-page rarity trait. Each watch identity is exact normalized contract plus rarity, so one contract may be monitored independently for both rarities. Bids, purchases, wallet operations and payment UI are excluded. Historical Exotic sales remain independent of present availability. Legendary v1 covers active listings, independent baselines, candidates, alerts and retry state; it does not add Legendary historical-sale enrichment. The approved roster is private and must be supplied on restore; this document is not a collection inventory.
+The compatibility name understates the implementation. The monitor currently tracks exact Polygon contract-plus-rarity watches for **Exotic, Legendary, Epic, and Rare** assets. The private saved roster contained **46 enabled watches** at review: **22 Exotic, 12 Legendary, 9 Epic, and 3 Rare**. These counts were calculated from current state; this document intentionally omits contract addresses, product inventory, aliases, destination identifiers, and marketplace URLs.
 
-## Zero-LLM collection management
+The monitor detects active BUY NOW listings only after the collection result and product page establish the configured rarity. It does not buy, bid, connect a wallet, or infer rarity from a collection name. Existing inventory is baselined without a change alert.
 
-- `scripts/rarity_watch_manager.py` accepts JSON and implements Add, Disable, Remove and List Saved without an agent or model call. Polygon contracts must be exactly `0x` plus 40 hexadecimal characters and rarity must be exactly `Exotic` or `Legendary`.
-- Add owns the shared execution lease, deduplicates exact contract+rarity, resolves exact metadata from the local full MTD catalog before an exact Rarible metadata fallback, then invokes the established validating Playwright collector for only that target. Add succeeds only after a verified baseline; failed or ambiguous checks do not save or enable a watch and never claim that nothing is available. Existing inventory becomes the initial baseline and never generates a listing-change alert. After the lease is released, a dedicated deterministic Discord helper posts and reads back one onboarding status in the configured Exotic channel: either verified active BUY NOW listings or an explicit no-active-listings result. A pending notice is persisted before delivery, and resubmitting the exact watch retries that notice without another marketplace check. A baseline-verified watch is enabled for subsequent interval and 8 AM heartbeat reports even if Discord delivery is temporarily pending. Disable, Remove and List Saved make no marketplace/API/browser call and send no notification.
-- State schema v2 adds `rarity`, `watch_key` and `enabled` to each collection. Legacy records migrate to Exotic while preserving baselines, history, observations and delivery state. Legacy candidate keys migrate to exact watch keys. Disable retains saved history; Remove deletes only the exact watch and its exact pending candidate/retry target references.
-- The unified `plugins/rarity-watch-manager` package provides a persistent Hermes Desktop pane backed by `ctx.rest` and the scoped Python plugin API. It never submits a prompt. The pane visibly labels Add as live and provides Add, Disable, Remove and List Saved controls with an in-pane Result region.
-- `scripts/rarity_watch_portal.py` provides the same contract/rarity/optional display/category form as a standalone loopback browser portal on port 8767. It calls deterministic local code—never a plugin REST route, Hermes agent, prompt, or coding model—so portal operation consumes zero LLM tokens. Add visibly reports Discord delivery as read-back verified or pending; Disable, Remove, and List Saved are identified as saved-state-only. **Run Update + Heartbeat** launches `run_rarity_update_and_heartbeat.py` in the background: it runs the established full collector under the shared lease, delivers and reads back the regular Discord result, and sends a freshly rendered price-sorted heartbeat only after a complete outcome. Partial outcomes deliver their normal status but withhold the heartbeat until all watches resolve. **Update Status** reads its durable local status without live calls. The portal enforces exact loopback Host and Origin, a private persistent CSRF secret that remains valid across server restarts, strict request sizing, exact action/contract/rarity validation, no-store responses, a restrictive CSP, and escaped output. `/health` reports `llm_tokens: 0`.
+## 2. Runtime architecture
 
-## Actual runtime and cadence
+- The scheduled Python wrapper owns the shared execution lease and invokes the Node/Playwright collector attached to a dedicated local browser endpoint.
+- The deterministic manager and loopback portal support Add, Disable, Remove, List, full update, pending-candidate confirmation, saved-heartbeat resend, and status inspection without an agent/model call.
+- Current manager validation allows the four implemented rarities. Each watch is identified by normalized contract plus rarity.
+- The collector is serial. It uses a 10-second navigation gap, a 4-second render settle, and at most two measured attempts per collection observation.
+- Batch execution is bounded from 600 to 1,500 seconds according to selected-watch count, with additional wrapper allowance.
+- Last-known-good collection baselines survive collection-local failures and budget skips. A global marketplace/browser block stops the run and leaves all baselines unchanged.
 
-- Hermes no-agent primary run_mcfarlane_exotic_deterministic.py owns a shared execution lease, refreshes current POL/USD, then invokes the Node collector run_mcfarlane_exotic_deterministic.js. Python psutil and the read-only cron execution ledger identify the actual scheduled occurrence.
-- Primary schedule: 00:00, 08:00, 12:00, 16:00 and 20:00 America/New_York. WhatsApp downstream: minute 15 of those hours. Priority confirmation: minute 14, not a guaranteed ten minutes after run completion; it can defer while the lease is busy.
-- Technical retry scheduler polls each minute; purchase-priority confirmation reads saved candidates first. Empty/not-due stages make no marketplace request.
-- Silent missing-history enrichment polls every 15 minutes, yields to primary/priority/retry work and uses the same lease.
-- Browser collection uses Playwright attached to a dedicated Chrome CDP endpoint on IPv6 loopback port 9222. Browser provisioning/supervision is external to the collector. The source does not prove an automatic browser restart service exists.
+## 3. Confirmed-change semantics
 
-## Collection, verification and comparison
+A changed collection snapshot becomes a pending candidate. A second matching observation is required before promotion. The current Discord path can report listing additions, removals, and repricing represented by the promoted snapshot; the separate WhatsApp completion path is narrower.
 
-- Collection navigation is serial, canonical rarity-filtered URLs are checked and BUY NOW cards are verified on token pages for the watch's exact Exotic or Legendary trait. Bid-only cards do not become listings. A missing/ambiguous control or loading shell is not proof of an empty collection.
-- The installed collector uses GAP_MS=10000, a 4-second load settle and two collection attempts. This is an implementation fact, not compliance with the saved operating preference for at least 15 seconds. Closing that pacing mismatch requires a separate runtime change.
-- Batch budget is min(1500, max(600, selected collection count × 60 + 120)) seconds; wrapper allowance adds 120 seconds, with preflight/rate-refresh outside that allowance. Scheduler timeout must allow the entire wrapper.
-- Explicit global blocking evidence stops work. Local failures and budget-skipped collections retain last-known-good rows. Checkpoints preserve verified progress. The collector creates and closes its own page; it does not enumerate or close unrelated tabs. One bounded owned-page reconnect is permitted within the remaining deadline. Replaced-page cleanup is not guaranteed by the inspected recovery branch.
-- Differences are held as candidates until an independent matching observation promotes them. Candidate observations never supply confirmed removals. New token identity or a same-token/same-currency price cut of at least 10% is purchase-priority. Smaller decreases, removals and increases wait for ordinary confirmation.
-- Active seller enrichment uses active order makers and the canonical private `mcfarlane-wallet-aliases.json` database shared with completed-sales and tracked-wallet monitors. Listing set time is separate from collection Activity sale time. Metadata-only, seller-only and valuation changes are not listing-change events. The saved-state-only recurring-wallet audit compares distinct listing/sale/activity occurrences against that shared alias database without marketplace or notification calls.
+The active WhatsApp job runs saved-state processing only. Current policy permits **confirmed new listings only**, and only for Exotic or Legendary watches. It excludes Epic/Rare, removals, price changes, stale queued offers, and offers no longer present in the verified baseline. This is narrower than older documentation that described lower-price WhatsApp alerts.
 
-## Reliability and recovery
+Seller labels resolve through the shared private alias database when possible; otherwise only a masked suffix is displayed. Full wallets remain private in state.
 
-- Python and Node use a shared filesystem lease with inherited owner-token validation. Busy means defer; it must not spend retry budget. Stale leases fail closed and need owner/process inspection rather than blind deletion.
-- Technical recovery targets unresolved failures only, prioritizing budget-skipped names. Five retry stages use delays 1, 3, 5, 10 and 20 minutes, scheduled relative to each preceding outcome; they are not five absolute offsets from the original failure. Exhaustion is tied to primary generation and cannot be replenished by polling the same generation.
-- A primary partial result is reported once; intermediate incomplete targeted passes are suppressed. The unresolved set and confirmed undelivered deltas survive targeted passes; full recovery emits a resolved report.
-- Owed 08:00 heartbeat support now exists: wrapper arms pending8am before collection, Node claims it only after complete recovery and sufficiently fresh observations, and deliver_exotic_owed_heartbeat.py offers a saved-only handoff/status/verified-ledger repair helper. No recurring job for that helper was present in the inspected schedules; normal targeted recovery can claim the debt itself.
-- Heartbeat state records generation/handoff before the scheduler's actual Discord send. It is NOT a delivery acknowledgment: a downstream failure can lose the automatic replay opportunity. Runtime support and offline tests are not proof of a live delivered recovery heartbeat. Ledger schema, preserved primary job ID and correct process ancestry are prerequisites.
-- At this review's offline regression run, 24 of 25 existing Python reliability/context/enrichment/owed-heartbeat tests passed. The owed-heartbeat seed test failed because required_observation_at was absent instead of the ledger's actual started_at. This is a specific unresolved repair-path freshness gap, not proof that all heartbeat recovery works; rerun after a targeted runtime fix.
+## 4. Authoritative schedules
 
-## Destination-specific output
+All enabled cron expressions below were read from current `jobs.json`. No relevant job has an explicit per-job timezone field; intended interpretation is America/New_York, but scheduler daylight-saving behavior is not proven by configuration alone.
 
-- Ordinary Discord no-change primary results are compact status only, not unchanged collection rows. Confirmed changes contain details only for affected collections and explicit removals, including partial removals. When every watch fails because the dedicated CDP browser endpoint is unavailable, Discord receives one three-line shared-browser summary with the affected count, retained-data statement, retry status and last complete check instead of repeating the same connection trace for every watch.
-- The actual scheduled primary 08:00 ET occurrence is the compact active-listings exception: one concise collection/price line per active listing, explicitly labeled Exotic or Legendary and sorted by numeric selling price from lowest to highest, with POL and USD plus seller Name Tag or the saved four-character wallet suffix. Manual runs at 08:00 do not qualify merely because of wall time. If owed, it can accompany the eventual resolved output; already-handed-off dates are not replayed automatically.
-- WhatsApp uses the separate exotic_whatsapp_policy.js and saved-only downstream script. Only independently confirmed new listings and same-token/same-currency decreases of any size are eligible. No removals, increases, unchanged inventory, currency-only or metadata-only changes. The 10% threshold controls urgency, not final WhatsApp eligibility.
-- Downstream stdout is handed to Hermes delivery; consuming a queue is not proof the destination received it. Saved review/preview tools are not part of ordinary delta output.
+| Function | Current schedule |
+| --- | --- |
+| Full rarity collection | 01:00, 09:00, 13:00, 17:00, 21:00 daily |
+| Purchase-priority/pending confirmation | Every 2 minutes |
+| Bounded technical retry poll | Every minute |
+| WhatsApp confirmed-new-listing consumer | Every 2 minutes on odd minutes |
+| Daily source backup attempt | 23:40 |
 
-## Valuation and historical enrichment
+The daily active-listings heartbeat is tied to the actual **09:00 Eastern scheduled occurrence**, not 08:00. A busy full run persists a deferred-primary obligation; a missed 09:00 occurrence is preserved over later busy occurrences. Heartbeat debt is claimed only after a complete sufficiently fresh observation.
 
-- Current POL/USD is refreshed before collection; source failure retains the saved rate and does not intentionally block the collector. Current listing USD is display-only.
-- Last Exotic sale is selected from completed Activity and independently verified on a rendered product trait page. The resumable missing-history worker excludes user-disabled/terminal searches, persists pagination/progress, paces requests and cools down failures. Missing or exhausted history means not verified, never proof of no sale.
-- Saved sale-time priceUsd/amountUsd or historical cached valuation remains historical; do not reprice old sales using current POL spot.
+## 5. State, retention, and privacy
 
-## Backup, restore and verification boundary
+Private state stores the roster, current verified baselines, pending candidates, retry generations, onboarding notices, current valuation context, heartbeat debt, and pending delivery data. It is not a public collection inventory.
 
-The explicit monitor_backup_manifest.json includes the Python wrapper, Node collector and dynamically required WhatsApp policy, shared lease, rarity manager CLI/API/Desktop plugin, standalone zero-token loopback portal and their offline tests, technical retries, priority confirmation, spot-rate refresh, missing-history worker, alias resolver code, owed-heartbeat helper and backup/PRD utilities. Only code and these PRDs enter the source snapshot. No live state, raw aliases, wallets, private URLs, destinations, credentials, logs or browser profiles are copied. Python/Node packages are declared dependencies, not bundled binaries.
+Retention is mixed rather than governed by one policy:
 
-RESTORE.md and restore-config.json describe relocation placeholders, required private configuration, disabled schedule templates, browser/Node installation and controlled rebaseline. This is not a complete stateful disaster-recovery backup: previous dedupe, pending delivery, exact roster and history require separate private recovery. Legacy repository data/history is not retroactively sanitized.
+- Block diagnostics are pruned to the newest **20** records.
+- Current listing baselines and per-watch historical enrichment remain in the main state without a documented age-based purge.
+- Pending delivery/retry/onboarding records remain until their code path resolves or explicitly removes them.
+- Browser profile data, logs, credentials, aliases, wallets, destination IDs, and state are private and excluded from source snapshots.
 
-Automated refresh fingerprints every manifest source plus stable relevant recurring schedule semantics, private roster identity and allowlisted declarative policies. Declarations may themselves lag code; hashing them does not certify compliance. Observation timestamps, results and delivery queues do not create drift. It never advances a human review date merely because hashes changed. Markdown content changes regenerate DOCX. Daily backup checks a per-ET-day success/attempt cap before repository mutation, detects identical snapshots, refuses dirty repositories and legacy data artifacts, stages explicit files only and verifies the remote commit after a push. Original scheduler IDs are replaced with private restore placeholders; snapshot verification rejects extra files and scans DOCX package text, metadata and external relationships. Local snapshot validation does not claim a cloud update.
+Any future retention change must preserve unresolved delivery and heartbeat obligations before deleting historical records.
 
-The enabled daily backup remains at 23:40 America/New_York. Offline readiness is not permission to run a monitor, deliver notifications or push. Existing repository history and legacy non-manifest files require separate review; source-only snapshot validation covers the new snapshot, not historical commits.
+## 6. Failure and recovery behavior
+
+- Lease contention defers work and does not consume retry budget. Stale lease recovery requires process-owner validation; age alone is insufficient.
+- Local collection failure retains that watch’s prior baseline. A complete-success heartbeat is withheld when any required watch is unresolved.
+- Technical retries target unresolved watches in bounded stages. A recurring one-minute poll does not mean a marketplace call occurs every minute.
+- Browser/CDP unavailability produces a shared failure summary and keeps last-known-good data.
+- Delivery ledgers and exact read-back helpers reduce duplicates but do not prove unconditional exactly-once delivery across unknown network outcomes.
+- The scheduler’s `completed` status establishes process completion only; it does not independently prove collection completeness or destination receipt.
+
+## 7. Current operational errors and backup gaps
+
+As of the review date, the latest primary and frequent support jobs had completed ledger records, but the daily Exotic backup has an open failure. The current scheduler environment cannot import the DOCX library used by the PRD refresher. This review did not repair it because DOCX generation and runtime changes were explicitly out of scope.
+
+The source-only backup manifest also omits a local browser-recovery module imported by the retry path. The backup import-closure test therefore failed. The bundled Node runtime passed the collector tests; the shell-default Node runtime was too old for the installed Playwright version. Scheduled code should continue to use the configured bundled runtime rather than assuming `node` on PATH is sufficient.
+
+The source backup intentionally excludes all live state. Even after the manifest and dependency defects are fixed, source backup alone cannot restore roster identity, baselines, dedupe, pending alerts, heartbeat debt, aliases, browser profile, credentials, or destination mapping.
+
+## 8. Acceptance and verification boundaries
+
+Offline review verified the 46-watch rarity totals programmatically, the five primary daily occurrences and support schedules from `jobs.json`, Python reliability/portal/manager tests, and the Node collector test using the bundled runtime. It did **not** verify present marketplace contents, browser health, provider completeness, current destination permissions, any actual message, or any remote backup commit.
+
+A future operational sign-off requires: a complete scheduled collection, heartbeat/delta delivery read-back, scheduler timezone/DST evidence, corrected backup dependency/import closure, and a verified private-state recovery procedure.
 
 <!-- automated-drift:start -->
-**Observed implementation fingerprint:** `6d8005ff19a31e90eb3307b376a7c873e1bf45a2b9965a1bacdad7f078bda39d`
+**Observed implementation fingerprint:** `3c609b3c538c372a6c30e78b0048c3d2e816669ae7eea025d5294d026401218c`
 **Automated drift status:** changed or unreviewed; substantive review required. Hash comparison is not a requirements review.
 <!-- automated-drift:end -->

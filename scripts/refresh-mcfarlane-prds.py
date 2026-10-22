@@ -2,10 +2,30 @@
 from __future__ import annotations
 import hashlib
 import json
+import os
 import re
+import sys
 from pathlib import Path
-from docx import Document
-from docx.shared import Pt
+
+HERMES_PYTHON = Path(__file__).resolve().parents[1]/'hermes-agent/venv/Scripts/python.exe'
+try:
+    from docx import Document
+    from docx.shared import Pt
+except ModuleNotFoundError as error:
+    if error.name != 'docx':
+        raise
+    current = Path(sys.executable).resolve()
+    if not HERMES_PYTHON.is_file() or current == HERMES_PYTHON.resolve():
+        raise SystemExit(
+            f'python-docx is unavailable and Hermes venv Python unavailable or unusable: {HERMES_PYTHON}'
+        ) from error
+    try:
+        os.execv(str(HERMES_PYTHON), [str(HERMES_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
+    except OSError as exec_error:
+        raise SystemExit(
+            f'python-docx is unavailable and failed to re-exec with Hermes venv Python: {HERMES_PYTHON}'
+        ) from exec_error
+
 from monitor_backup import DOCS, manifest, fingerprint
 
 LEDGER=DOCS/'.mcfarlane-prd-signatures.json'

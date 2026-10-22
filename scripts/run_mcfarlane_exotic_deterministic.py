@@ -48,11 +48,34 @@ def scheduled_heartbeat_context(env=None, ledger=None, ancestor_pids=None):
     return None
 
 
+def deferred_primary_context(env=None):
+    """Accept only the small occurrence record written by the scheduled wrapper."""
+    env = os.environ if env is None else env
+    raw = env.get('MCFARLANE_DEFERRED_PRIMARY_OCCURRENCE')
+    if not raw:
+        return None
+    try:
+        occurrence = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(occurrence, dict):
+        return None
+    execution_id = occurrence.get('execution_id')
+    scheduled_at = occurrence.get('scheduled_at')
+    if not isinstance(execution_id, str) or not execution_id:
+        return None
+    if not isinstance(scheduled_at, str) or not scheduled_at or not scheduled_at.endswith(('Z', '+00:00')):
+        return None
+    return {'execution_id': execution_id, 'scheduled_at': scheduled_at}
+
+
 def main():
     command = ["__HERMES_HOME__/node/node.exe", "__HERMES_HOME__/price-watches/run_mcfarlane_exotic_deterministic.js"]
     child_env = dict(os.environ)
     child_env.pop('MCFARLANE_PRIMARY_OCCURRENCE', None)
-    occurrence = scheduled_heartbeat_context()
+    occurrence = deferred_primary_context()
+    if occurrence is None:
+        occurrence = scheduled_heartbeat_context()
     if occurrence:
         child_env['MCFARLANE_PRIMARY_OCCURRENCE'] = json.dumps(occurrence)
         subprocess.run(command + ['--arm-scheduled-heartbeat'], env=child_env,

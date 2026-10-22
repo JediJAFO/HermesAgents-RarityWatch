@@ -17,7 +17,7 @@
       "script": "confirm_priority_exotic_listing_candidates.py",
       "schedule": {
         "kind": "cron",
-        "expr": "14 0,8,12,16,20 * * *"
+        "expr": "*/2 * * * *"
       },
       "configured_enabled": true,
       "enabled": false,
@@ -53,7 +53,7 @@
       "script": "run_mcfarlane_exotic_scheduled.py",
       "schedule": {
         "kind": "cron",
-        "expr": "0 0,8,12,16,20 * * *"
+        "expr": "0 1,9,13,17,21 * * *"
       },
       "configured_enabled": true,
       "enabled": false,
@@ -65,7 +65,7 @@
       "script": "run_mcfarlane_exotic_whatsapp.py",
       "schedule": {
         "kind": "cron",
-        "expr": "15 0,8,12,16,20 * * *"
+        "expr": "1-59/2 * * * *"
       },
       "configured_enabled": true,
       "enabled": false,

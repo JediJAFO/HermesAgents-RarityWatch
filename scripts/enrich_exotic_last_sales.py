@@ -169,7 +169,7 @@ def listing_priority(state, now):
     local = datetime.fromtimestamp(now, ZoneInfo('America/New_York'))
     minute = local.hour * 60 + local.minute
     # Reserve primary starts, their 25-minute budget, confirmations and recovery.
-    if any(-3 <= ((minute - hour * 60 + 720) % 1440 - 720) <= 45 for hour in (0, 8, 12, 16, 20)):
+    if any(-3 <= ((minute - hour * 60 + 720) % 1440 - 720) <= 45 for hour in (1, 9, 13, 17, 21)):
         return True
     candidates = state.get('pending_exotic_change_candidates') or {}
     if any(c['name'] in candidates and is_priority_listing_candidate(c, candidates[c['name']]) for c in state.get('collections', [])):

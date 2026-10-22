@@ -50,12 +50,19 @@ function testReportUsesExplicitRarityLabel() {
   assert.match(text, /\[Legendary\]/);
 }
 
+function testPriorityConfirmationNamesConfirmationAndLinksMarketplaceCategory() {
+  const source = 'https://mcfarlanetoys.digital/explore/POLYGON:0x'+'e'.repeat(40)+'/?sort=cheapest&inStockOnly=true&traits%5BRarity%5D%5B0%5D=Exotic';
+  const c = {name:'Priority',contract:'0x'+'e'.repeat(40),rarity:'Exotic',watch_key:'0x'+'e'.repeat(40)+'|Exotic',source_url:source,baseline:{for_sale:true,listing_count:1,listings:[{token_id:'1',price:75,currency:'POLYGON'}]}};
+  const text = collector.report({collections:[c]}, {complete:true,run_kind:'confirmation',failed_collections:[],discord_changes:[{watch_key:c.watch_key,name:c.name,rarity:c.rarity,removed_listings:[]}]});
+  assert.match(text, /Confirmed new\/lower-priced listing/);
+  assert.ok(text.includes(`[View marketplace](<${source}>)`));
+}
+
 function testHeartbeatUsesExplicitRarityLabelAndSeller() {
   const c = {name:'Same',contract:'0x'+'d'.repeat(40),rarity:'Legendary',watch_key:'0x'+'d'.repeat(40)+'|Legendary',baseline:{for_sale:true,listing_count:1,listings:[{price:10,currency:'POLYGON',seller_wallet:'0x'+'1'.repeat(36)+'abcd'}]}};
   const text = collector.heartbeatReport({collections:[c],current_pol_usd:{rate:0.2}}, {complete:true,saved_preview:true});
-  assert.match(text, /\[Legendary\] Same/);
-  assert.match(text, /\$2\.00/);
-  assert.match(text, /\.\.\.abcd/);
+  const row = text.split(/\r?\n/).find(line => line.startsWith('•'));
+  assert.match(row, /^• 10 POL \(\$2\.00\) — \[Legendary\] Same — \.\.\.abcd$/);
 }
 
 function testHeartbeatSortsListingsByAscendingSellingPrice() {
@@ -83,5 +90,5 @@ function testReportCompactsSharedBrowserConnectionFailure() {
   assert.doesNotMatch(text, /\*\*\[Exotic\] One\*\*/);
 }
 
-for (const test of [testMigrationPreservesLegacyAndKeysRarity, testSameContractBothRaritiesAreIndependent, testEpicAndRareAreSupportedByCollectorAndHeartbeat, testReportUsesExplicitRarityLabel, testHeartbeatUsesExplicitRarityLabelAndSeller, testHeartbeatSortsListingsByAscendingSellingPrice, testReportCompactsSharedBrowserConnectionFailure]) test();
+for (const test of [testMigrationPreservesLegacyAndKeysRarity, testSameContractBothRaritiesAreIndependent, testEpicAndRareAreSupportedByCollectorAndHeartbeat, testReportUsesExplicitRarityLabel, testPriorityConfirmationNamesConfirmationAndLinksMarketplaceCategory, testHeartbeatUsesExplicitRarityLabelAndSeller, testHeartbeatSortsListingsByAscendingSellingPrice, testReportCompactsSharedBrowserConnectionFailure]) test();
 console.log('rarity collector tests passed');

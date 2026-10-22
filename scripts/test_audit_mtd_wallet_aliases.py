@@ -9,12 +9,15 @@ class RecurringUnnamedWalletAuditTests(unittest.TestCase):
         import audit_mtd_wallet_aliases as a
         unknown = '0x' + '1' * 31 + '123456789'
         known = '0x' + '2' * 40
-        masked = '0xabc12345' + '3' * 25 + 'deadbeef0'
+        masked = '0xabc12345' + '3' * 23 + 'deadbeef0'
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             self.write(root, 'mcfarlane-wallet-aliases.json', {
-                'exact_aliases': {known: 'Known'},
-                'masked_aliases': [{'prefix': '0xabc12345', 'suffix': 'deadbeef0', 'name_tag': 'Masked'}]})
+                'schema_version': 3,
+                'aliases': [
+                    {'wallet': known, 'alias': 'Known'},
+                    {'wallet': None, 'alias': 'Masked', 'masked_prefix': '0xabc12345', 'masked_suffix': 'deadbeef0'}],
+                'exact_aliases': {}, 'masked_aliases': []})
             self.write(root, 'mcfarlane-exotics.json', {'collections': [{
                 'contract': '0xcollection',
                 'baseline': {'listings': [
@@ -22,7 +25,8 @@ class RecurringUnnamedWalletAuditTests(unittest.TestCase):
                     {'token_id': '2', 'seller_wallet': known}]},
                 'last_exotic_sale': {'buyer_wallet': masked, 'buyer_activity_id': 'sale-masked'}}]})
             self.write(root, 'mcfarlane-dc-sales.json', {'recent_sales': [
-                {'activity_id': 'sale-1', 'buyer_wallet': unknown, 'seller_wallet': known}],
+                {'activity_id': 'sale-1', 'buyer_wallet': unknown, 'seller_wallet': known},
+                {'activity_id': 'sale-2', 'buyer_wallet': masked, 'seller_wallet': known}],
                 'baseline': {'newest_sale': {'activity_id': 'sale-1', 'buyer_wallet': unknown}}})
             self.write(root, 'holder-activity-state.json', {'wallets': {
                 known: {'name': 'Known', 'history': [{'events': [

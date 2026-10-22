@@ -10,9 +10,11 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from exotic_execution_lock import run_locked, BUSY
+from recover_isolated_monitor_chrome import recover_isolated_browser
 
 STATE = Path(r"__HERMES_HOME__/price-watches/mcfarlane-exotics.json")
 COLLECTOR = Path(r"__HERMES_HOME__/scripts/run_mcfarlane_exotic_deterministic.py")
+DEFERRED_PRIMARY = Path(r"__HERMES_HOME__/price-watches/mcfarlane-deferred-primary.json")
 DELAYS_MINUTES = (1, 3, 5, 10, 20)
 RETRY_KEY = "automatic_exotic_retry_state"
 CANDIDATE_MARKER = "candidate listing change held for next-interval confirmation"
@@ -40,6 +42,35 @@ def atomic_write(state: dict) -> None:
     temporary = STATE.with_suffix(".retry.tmp")
     temporary.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
     temporary.replace(STATE)
+
+
+def _read_deferred_primary(path: Path | None = None) -> dict | None:
+    path = DEFERRED_PRIMARY if path is None else Path(path)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return {}
+
+
+def run_deferred_primary() -> int:
+    marker = _read_deferred_primary()
+    if marker is None:
+        return 0
+    generation = marker.get('generation')
+    occurrence = marker.get('occurrence')
+    environment = os.environ.copy()
+    if isinstance(occurrence, dict):
+        environment['MCFARLANE_DEFERRED_PRIMARY_OCCURRENCE'] = json.dumps(occurrence, separators=(',', ':'))
+    result = subprocess.run([sys.executable, str(COLLECTOR)], env=environment, check=False)
+    if result.returncode != BUSY:
+        current = _read_deferred_primary()
+        if current is not None and ((generation and current.get('generation') == generation)
+                                    or (not generation and current == marker)):
+            DEFERRED_PRIMARY.unlink(missing_ok=True)
+    return result.returncode
 
 
 def retryable_names(outcome: dict) -> list[str]:
@@ -134,6 +165,11 @@ def main() -> int:
         environment["MCFARLANE_WATCH_KEYS"] = "|,|".join(keys)
     else:
         environment["MCFARLANE_COLLECTION_NAMES"] = "|".join(names)
+    if outcome.get("shared_failure") == "local_browser_cdp_timeout":
+        try:
+            recover_isolated_browser()
+        except (OSError, RuntimeError):
+            return 1
     result = subprocess.run([sys.executable, str(COLLECTOR)], env=environment, check=False)
     if result.returncode == BUSY:
         return BUSY
@@ -160,7 +196,39 @@ def main() -> int:
     return result.returncode
 
 
+def retry_work_due() -> bool:
+    state = json.loads(STATE.read_text(encoding="utf-8"))
+    if shared_certificate_failure(state):
+        return False
+    outcome = state.get("last_monitor_outcome")
+    retry = state.get(RETRY_KEY)
+    primary_id = state.get("last_primary_exotic_run_id")
+    if (isinstance(retry, dict) and retry.get("exhausted")
+            and retry.get("primary_run_id") == primary_id):
+        return False
+    if not isinstance(outcome, dict) or outcome.get("complete"):
+        return retry is not None
+    if not retryable_names(outcome):
+        return retry is not None
+    new_primary = (primary_id is not None and isinstance(retry, dict)
+                   and retry.get("primary_run_id") != primary_id)
+    if not isinstance(retry, dict) or new_primary:
+        return True
+    due = parse_time(retry.get("next_retry_at"))
+    attempts = int(retry.get("attempts_started") or 0)
+    return attempts < len(DELAYS_MINUTES) and due is not None and utc_now() >= due
+
+
 def cron_entry() -> int:
+    # A scheduled full scan that encountered a live lease takes precedence over
+    # targeted technical retries. The marker remains until a real pass starts.
+    if _read_deferred_primary() is not None:
+        result = run_locked(run_deferred_primary)
+        return 0 if result == BUSY else result
+    # The once-per-minute scheduler should not create and remove the shared
+    # marketplace lease unless retry state actually needs inspection/mutation.
+    if not retry_work_due():
+        return 0
     # BUSY is intentional deferral, not a cron failure. Keep it distinct inside
     # the orchestrator so skipped work never consumes the retry budget.
     result = run_locked(main)

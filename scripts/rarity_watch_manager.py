@@ -174,7 +174,7 @@ def _onboarding_report(entry: dict[str, Any], state: dict[str, Any]) -> str:
         count = len(listings)
         lines.append(f"{count} active BUY NOW listing{'s' if count != 1 else ''} verified:")
         lines.extend(f"• {_price_label(item, state)} — {_seller_label(item)}" for item in listings)
-    lines.append("Included in subsequent interval checks and the 8AM ET heartbeat.")
+    lines.append("Included in subsequent interval checks and the 9AM ET heartbeat.")
     return "\r\n".join(lines) + "\r\n"
 
 
