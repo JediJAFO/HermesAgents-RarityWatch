@@ -12,7 +12,7 @@
     "price-watches/exotic_whatsapp_policy.js": "a0d18854d21dcd8b7ae5e00e25d5a21ceda251ccc86f59b188c1df31b7570b39",
     "price-watches/mcfarlane_wallet_aliases.py": "61e4c22bb18eb2d94272a5ae5d6a07d9e639be326b5c45714465b991d3273062",
     "price-watches/rarity_watch_discord_delivery.py": "24a7aa999cb3e4dd997e458d2fd9542a177f5808fe1158e6399388cf740e4aa8",
-    "price-watches/run_mcfarlane_exotic_deterministic.js": "34192498cf903ac97d530a85af9486a0a8ef52ca6f7b057c71c0238a6358b06c",
+    "price-watches/run_mcfarlane_exotic_deterministic.js": "d675fec4400544d44f01d18dbd33e0b756bb366841f04c5b144cf160f9efe893",
     "price-watches/test_rarity_collector.js": "da1ea01517204fb7df610729145a5b2016aaf0e2449cb1e9b28fc06914e4cdfa",
     "restore-config.json": "159c15f1f623ba049f3b571839ebc49f8edb311802b4fc154b714228c1919430",
     "scripts/audit_mtd_wallet_aliases.py": "928ccfe09967886196c115e0357e849853210dfde6cc06f44c160265426e6971",

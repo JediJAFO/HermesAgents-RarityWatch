@@ -9,10 +9,14 @@ const STATE = path.join(ROOT, 'mcfarlane-exotics.json');
 const RUN = path.join(ROOT, 'mcfarlane-deterministic-run.json');
 const ALIASES = path.join(ROOT, 'mcfarlane-wallet-aliases.json');
 const BLOCK_DIAGNOSTICS = path.join(ROOT, 'marketplace-block-diagnostics');
+const RENDER_DIAGNOSTICS = path.join(ROOT, 'marketplace-render-diagnostics');
 const CDP = 'http://127.0.0.1:9222';
 const RARIBLE_API = 'https://api.rarible.org/v0.1/orders/sell/byItem';
 const GAP_MS = 10000; // User-required minimum pacing between marketplace navigations.
-const LOAD_SETTLE_MS = 4000;
+const LOAD_SETTLE_MS = 1000;
+const HYDRATION_TIMEOUT_MS = 15000;
+const COLLECTION_ATTEMPT_RESERVE_MS = 55000;
+const PRODUCT_ATTEMPT_RESERVE_MS = 65000;
 // Two measured attempts are sufficient for a transient UI shell. Longer retry
 // loops made a 10-collection run exceed its useful execution window.
 const MAX_ATTEMPTS = 2;
@@ -137,6 +141,9 @@ function sanitizeDiagnosticText(text) {
   return String(text || '')
     .replace(/0x[0-9a-f]{40}\b/gi, '0x…redacted')
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email redacted]')
+    .replace(/\b(token|session|authorization|auth|api[_-]?key)\s*[:=]\s*[^\s,;]+/gi, '$1=[secret redacted]')
+    .replace(/\b(?:Bearer\s+)?[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]{10,})?\b/g, '[credential redacted]')
+    .replace(/\b(?:\+?1[ .-]?)?\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4}\b/g, '[phone redacted]')
     .replace(/\s+/g, ' ').trim();
 }
 function blockEvidence(text, httpStatus = null) {
@@ -184,19 +191,59 @@ async function captureBlockDiagnostic(page, response, evidence, stage, collectio
   const detailFile = `${id}.json`;
   let screenshotSaved = false, screenshotError = null;
   try {
-    // This run stops after a block, so masking the diagnostic tab cannot affect
-    // a later observation. Never persist wallets, emails, or entered form data.
+    // Mask sensitive values for the screenshot, then restore the live DOM so a
+    // recoverable hydration timeout cannot poison the next observation/retry.
     await page.evaluate(() => {
       const redact = value => String(value || '')
         .replace(/0x[0-9a-f]{40}\b/gi, '0x…redacted')
-        .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email redacted]');
+        .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email redacted]')
+        .replace(/\b(token|session|authorization|auth|api[_-]?key)\s*[:=]\s*[^\s,;]+/gi, '$1=[secret redacted]')
+        .replace(/\b(?:Bearer\s+)?[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]{10,})?\b/g, '[credential redacted]')
+        .replace(/\b(?:\+?1[ .-]?)?\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4}\b/g, '[phone redacted]');
+      window.__hermesDiagnosticRestore = [];
       const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
-      for (let node = walker.nextNode(); node; node = walker.nextNode()) node.nodeValue = redact(node.nodeValue);
-      for (const input of document.querySelectorAll('input, textarea')) input.value = '';
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const original = node.nodeValue;
+        const masked = redact(original);
+        if (masked !== original) { window.__hermesDiagnosticRestore.push([node, original, 'text']); node.nodeValue = masked; }
+      }
+      for (const input of document.querySelectorAll('input, textarea')) {
+        window.__hermesDiagnosticRestore.push([input, input.value, 'value']); input.value = '';
+      }
+      for (const select of document.querySelectorAll('select')) {
+        window.__hermesDiagnosticRestore.push([select, select.value, 'value']); select.value = '';
+      }
+      for (const element of document.querySelectorAll('[placeholder], [aria-label], [title], [alt]')) {
+        for (const attribute of ['placeholder','aria-label','title','alt']) {
+          if (!element.hasAttribute(attribute)) continue;
+          const original = element.getAttribute(attribute);
+          const masked = redact(original);
+          if (masked !== original) { window.__hermesDiagnosticRestore.push([element, original, `attr:${attribute}`]); element.setAttribute(attribute, masked); }
+        }
+      }
+      for (const media of document.querySelectorAll('img, canvas, video, svg')) {
+        window.__hermesDiagnosticRestore.push([media, media.getAttribute('style'), 'style']);
+        media.style.visibility = 'hidden';
+      }
     });
     await page.screenshot({path:path.join(dir, screenshotFile), fullPage:false, timeout:10000});
     screenshotSaved = true;
   } catch (error) { screenshotError = String(error?.message || error).slice(0, 180); }
+  finally {
+    try {
+      await page.evaluate(() => {
+        for (const [node, original, kind] of (window.__hermesDiagnosticRestore || [])) {
+          try {
+            if (kind === 'text') node.nodeValue = original;
+            else if (kind === 'value') node.value = original;
+            else if (kind === 'style') original === null ? node.removeAttribute('style') : node.setAttribute('style', original);
+            else if (kind.startsWith('attr:')) node.setAttribute(kind.slice(5), original);
+          } catch {}
+        }
+        delete window.__hermesDiagnosticRestore;
+      });
+    } catch {}
+  }
   let title = '';
   try { title = sanitizeDiagnosticText(await page.title()).slice(0, 200); } catch {}
   let httpStatus = null;
@@ -217,6 +264,15 @@ async function captureBlockDiagnostic(page, response, evidence, stage, collectio
   atomicJson(path.join(dir, detailFile), diagnostic);
   pruneBlockDiagnostics(dir);
   return diagnostic;
+}
+let hydrationDiagnosticCaptured = false;
+async function captureHydrationDiagnosticOnce(page, response, stage, collection, excerpt) {
+  if (hydrationDiagnosticCaptured) return null;
+  hydrationDiagnosticCaptured = true;
+  return captureBlockDiagnostic(page, response, {
+    matched_signal:`${stage} hydration timeout`,
+    excerpt:sanitizeDiagnosticText(excerpt).slice(-500),
+  }, `${stage}-hydration`, collection, RENDER_DIAGNOSTICS);
 }
 function priceFrom(text) {
   const m = text.replace(/\u00a0/g, ' ').match(/([\d,]+(?:\.\d+)?)\s*(POLYGON|MATIC|POL)\b/i);
@@ -263,38 +319,85 @@ function ownerFromProductText(text) {
   const masked = text.match(/(?:owned\s+by|owner)[\s\S]{0,80}?(?:\.\.\.|…)([a-f0-9]{4,9})\b/i);
   return masked ? { display: `...${masked[1].toLowerCase()}` } : null;
 }
-async function extractObservation(page, collection, response, captureDiagnostic = captureBlockDiagnostic) {
-  const actualUrl = page.url();
-  const body = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
-  let status = null;
-  try { status = response?.status?.(); } catch {}
-  const block = blockEvidence(body, status);
-  if (block) return { kind: 'GLOBAL_BLOCK', reason: 'explicit marketplace block evidence',
-    block_diagnostic: await captureDiagnostic(page, response, block, 'collection', collection) };
-  if (!sameFilteredUrl(actualUrl, collection.source_url)) return { kind: 'UNAVAILABLE', reason: 'unexpected filtered-URL redirect', actual_url: actualUrl };
-
-  // The current storefront omits the visible filter-control widgets even when
-  // the exact canonical filtered URL is retained.  The stronger operational
-  // proof is the exact URL plus BUY NOW card extraction and per-item trait
-  // verification below; do not treat absent cosmetic controls as a change.
-
-  // Wait briefly for either a listing card or an explicit empty-state signal.
-  // A loading shell must never be promoted as a verified zero-listing result.
-  await page.waitForFunction(() => {
-    const text = document.body ? document.body.innerText : '';
-    return Boolean(document.querySelector('a[href*="/token/"]')) || /\b(no items found|no results found|nothing found|0 items)\b/i.test(text);
-  }, { timeout: 10000 }).catch(() => {});
-  const tokenAnchors = await page.locator('a[href*="/token/"]').evaluateAll(nodes => nodes.map(a => {
-    let p = a; let text = '';
+const EMPTY_LISTING_PATTERN = /\b(no items found|no results found|nothing found|0 items)\b/i;
+async function readCollectionSnapshot(page) {
+  const body = await page.locator('body').innerText({timeout:1000}).catch(() => '');
+  let cards = [];
+  try {
+    const tokenLocator = page.locator('a[href*="/token/"]');
+    if (typeof tokenLocator.evaluateAll !== 'function') return {body, cards};
+    cards = await tokenLocator.evaluateAll(nodes => nodes.map(a => {
+    let p = a, text = '';
     for (let i = 0; i < 6 && p; i++, p = p.parentElement) {
       const candidate = (p.innerText || '').trim();
       if (candidate.length > text.length) text = candidate;
-      if (/BUY NOW/i.test(candidate) && candidate.length < 1400) { text = candidate; break; }
+      if (/BUY NOW|Highest bid|No bids yet|OPEN FOR BIDS/i.test(candidate) && candidate.length < 1400) { text = candidate; break; }
     }
-    return { href: a.href, text };
-  })).catch(() => []);
+    return {href:a.href, text, has_progress:Boolean(a.querySelector('[role="progressbar"]'))};
+    }));
+  } catch { cards = []; }
+  return {body, cards};
+}
+function collectionRenderState(snapshot) {
+  const body = String(snapshot?.body || '');
+  const cards = Array.isArray(snapshot?.cards) ? snapshot.cards : [];
+  const explicit_empty = EMPTY_LISTING_PATTERN.test(body);
+  const hydrated = cards.filter(card => !card.has_progress && /\b(?:BUY\s+NOW|Highest bid|No bids yet|OPEN FOR BIDS)\b/i.test(String(card.text || '')));
+  return {ready:explicit_empty || hydrated.length > 0, explicit_empty, cards:hydrated, body};
+}
+async function waitForCollectionEvidence(page, timeoutMs = HYDRATION_TIMEOUT_MS, readSnapshot = readCollectionSnapshot, httpStatus = null) {
+  const polls = Math.max(1, Math.ceil(timeoutMs / 500));
+  const deadline = Date.now() + timeoutMs;
+  let last = {body:'', cards:[]};
+  for (let i = 0; i < polls; i++) {
+    if (i > 0 && Date.now() >= deadline) break;
+    last = await readSnapshot(page);
+    const block = blockEvidence(last.body, httpStatus);
+    if (block) return {...collectionRenderState(last), block};
+    const state = collectionRenderState(last);
+    if (state.ready) return state;
+    if (i + 1 < polls) await sleep(500);
+  }
+  return {...collectionRenderState(last), ready:false, hydration_timeout:true};
+}
+function productRenderState(text) {
+  const product = productTextBeforeRecommendations(text);
+  const hasRarity = /\bRarity\s*(?:\n|\s)+[A-Za-z][A-Za-z ]{1,30}\b/i.test(product);
+  const hasOffer = /\b(?:BUY\s+NOW|OPEN FOR BIDS|NOT FOR SALE|NOT LISTED)\b/i.test(product);
+  return {ready:hasRarity && hasOffer, text:String(text || '')};
+}
+async function waitForProductEvidence(page, timeoutMs = HYDRATION_TIMEOUT_MS, readText = async p => p.locator('body').innerText({timeout:1000}).catch(() => ''), httpStatus = null) {
+  const polls = Math.max(1, Math.ceil(timeoutMs / 500));
+  const deadline = Date.now() + timeoutMs;
+  let text = '';
+  for (let i = 0; i < polls; i++) {
+    if (i > 0 && Date.now() >= deadline) break;
+    text = await readText(page);
+    const block = blockEvidence(text, httpStatus);
+    if (block) return {...productRenderState(text), ready:true, block};
+    const state = productRenderState(text);
+    if (state.ready) return state;
+    if (i + 1 < polls) await sleep(500);
+  }
+  return {...productRenderState(text), ready:false, hydration_timeout:true};
+}
+async function extractObservation(page, collection, response, captureDiagnostic = captureBlockDiagnostic) {
+  const actualUrl = page.url();
+  let status = null;
+  try { status = response?.status?.(); } catch {}
+  const rendered = await waitForCollectionEvidence(page, HYDRATION_TIMEOUT_MS, readCollectionSnapshot, status);
+  const body = rendered.body;
+  if (rendered.block) return { kind: 'GLOBAL_BLOCK', reason: 'explicit marketplace block evidence',
+    block_diagnostic: await captureDiagnostic(page, response, rendered.block, 'collection', collection) };
+  if (!sameFilteredUrl(actualUrl, collection.source_url)) return { kind: 'UNAVAILABLE', reason: 'unexpected filtered-URL redirect', actual_url: actualUrl };
+  if (rendered.hydration_timeout) {
+    const diagnostic = await captureHydrationDiagnosticOnce(page, response, 'collection', collection, body);
+    return {kind:'UNAVAILABLE', reason:'collection card hydration timeout', actual_url:actualUrl,
+      ...(diagnostic ? {render_diagnostic:diagnostic} : {})};
+  }
+  const tokenAnchors = rendered.cards.map(({href,text}) => ({href,text}));
   const listings = normalizeListings(tokenAnchors);
-  const explicitEmpty = /\b(no items found|no results found|nothing found|0 items)\b/i.test(body);
+  const explicitEmpty = rendered.explicit_empty;
   // A token card that contains BUY NOW but cannot be parsed is ambiguous, so
   // retain the last known-good baseline.  Bid-only cards are different: they
   // are affirmative evidence of no active fixed-price listing and may produce
@@ -320,19 +423,24 @@ async function extractObservation(page, collection, response, captureDiagnostic 
 async function verifyRarityTraits(page, listings, deadlineAt, rarity) {
   const active = [];
   for (const listing of listings) {
-    if (Date.now() + GAP_MS + 30000 > deadlineAt) return { ok: false, reason: 'batch time budget reached before product rarity verification' };
+    if (Date.now() + GAP_MS + PRODUCT_ATTEMPT_RESERVE_MS > deadlineAt) return { ok: false, reason: 'batch time budget reached before product rarity verification' };
     // A product page is the definitive rarity check. This is also a marketplace
     // navigation, so it receives the same measured cooldown as collection URLs.
     await sleep(GAP_MS);
     try {
       const response = await page.goto(listing.url, { waitUntil: 'domcontentloaded', timeout: 25000 });
       await sleep(LOAD_SETTLE_MS);
-      const text = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
       let status = null;
       try { status = response?.status?.(); } catch {}
-      const block = blockEvidence(text, status);
-      if (block) return { ok: false, global: true, reason: 'explicit marketplace block evidence on product page',
-        block_diagnostic: await captureBlockDiagnostic(page, response, block, 'product', {name:listing.name, rarity}) };
+      const rendered = await waitForProductEvidence(page, HYDRATION_TIMEOUT_MS, undefined, status);
+      const text = rendered.text;
+      if (rendered.block) return { ok: false, global: true, reason: 'explicit marketplace block evidence on product page',
+        block_diagnostic: await captureBlockDiagnostic(page, response, rendered.block, 'product', {name:listing.name, rarity}) };
+      if (rendered.hydration_timeout) {
+        const diagnostic = await captureHydrationDiagnosticOnce(page, response, 'product', {name:listing.name, rarity}, text);
+        return {ok:false, reason:`product page hydration timeout for token ${listing.token_id}`,
+          ...(diagnostic ? {render_diagnostic:diagnostic} : {})};
+      }
       if (!sameFilteredUrl(page.url(), listing.url)) return { ok: false, reason: `unexpected product URL for token ${listing.token_id}` };
       const productText = productTextBeforeRecommendations(text);
       if (/\bOPEN FOR BIDS\b/i.test(productText)) continue;
@@ -384,7 +492,7 @@ async function observeWithRetries(page, collection, waitBeforeNav, deadlineAt, r
   let last = null;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const needsGap = attempt > 1 || waitBeforeNav();
-    if (Date.now() + (needsGap ? GAP_MS : 0) + 30000 > deadlineAt) return { kind: 'UNAVAILABLE', reason: 'batch time budget reached before collection check', attempts: attempt - 1 };
+    if (Date.now() + (needsGap ? GAP_MS : 0) + COLLECTION_ATTEMPT_RESERVE_MS > deadlineAt) return { kind: 'UNAVAILABLE', reason: 'batch time budget reached before collection check', attempts: attempt - 1 };
     if (needsGap) await sleep(GAP_MS);
     try {
       if (page.isClosed?.() && recoverPage) page = await recoverPage(deadlineAt);
