@@ -14,9 +14,13 @@ const CDP = 'http://127.0.0.1:9222';
 const RARIBLE_API = 'https://api.rarible.org/v0.1/orders/sell/byItem';
 const GAP_MS = 10000; // User-required minimum pacing between marketplace navigations.
 const LOAD_SETTLE_MS = 1000;
-const HYDRATION_TIMEOUT_MS = 15000;
-const COLLECTION_ATTEMPT_RESERVE_MS = 55000;
-const PRODUCT_ATTEMPT_RESERVE_MS = 65000;
+const PRIMARY_HYDRATION_TIMEOUT_MS = 15000;
+const RETRY_HYDRATION_TIMEOUT_MS = 45000;
+function hydrationTimeoutForRun() {
+  return process.env.MCFARLANE_RUN_KIND === 'retry' ? RETRY_HYDRATION_TIMEOUT_MS : PRIMARY_HYDRATION_TIMEOUT_MS;
+}
+function collectionAttemptReserveMs() { return 40000 + hydrationTimeoutForRun(); }
+function productAttemptReserveMs() { return 50000 + hydrationTimeoutForRun(); }
 // Two measured attempts are sufficient for a transient UI shell. Longer retry
 // loops made a 10-collection run exceed its useful execution window.
 const MAX_ATTEMPTS = 2;
@@ -165,6 +169,44 @@ function safeDiagnosticUrl(raw) {
   try { const url = new URL(raw); return `${url.origin}${url.pathname}`; }
   catch { return ''; }
 }
+const MARKETPLACE_TELEMETRY = new WeakMap();
+function isMarketplaceDataUrl(raw) {
+  try { return ['market-api.wlbl.xyz', 'api.rarible.org'].includes(new URL(raw).hostname); }
+  catch { return false; }
+}
+function attachMarketplaceTelemetry(page) {
+  if (!page || typeof page.on !== 'function' || MARKETPLACE_TELEMETRY.has(page)) return;
+  const events = [];
+  const append = event => { events.push(event); if (events.length > 100) events.splice(0, events.length - 100); };
+  page.on('response', response => {
+    try {
+      const raw = response.url();
+      if (!isMarketplaceDataUrl(raw)) return;
+      append({kind:'response', url:safeDiagnosticUrl(raw), status:Number(response.status()), resource_type:response.request?.().resourceType?.() || null});
+    } catch {}
+  });
+  page.on('requestfailed', request => {
+    try {
+      const raw = request.url();
+      if (!isMarketplaceDataUrl(raw)) return;
+      append({kind:'requestfailed', url:safeDiagnosticUrl(raw), error:sanitizeDiagnosticText(request.failure?.()?.errorText || 'request failed').slice(0, 160), resource_type:request.resourceType?.() || null});
+    } catch {}
+  });
+  MARKETPLACE_TELEMETRY.set(page, events);
+}
+function markMarketplaceTelemetry(page) { return MARKETPLACE_TELEMETRY.get(page)?.length || 0; }
+function marketplaceTelemetrySince(page, mark = 0) {
+  return (MARKETPLACE_TELEMETRY.get(page) || []).slice(Math.max(0, Number(mark) || 0)).slice(-30);
+}
+function marketplaceApiFailure(events) {
+  const event = [...(Array.isArray(events) ? events : [])].reverse().find(item =>
+    item?.kind === 'requestfailed' || (item?.kind === 'response' && Number(item.status) >= 400)
+  );
+  if (!event) return null;
+  if (event.kind === 'requestfailed') return {reason:`marketplace data API request failed: ${sanitizeDiagnosticText(event.error).slice(0,120)}`, global:false, event};
+  const status = Number(event.status);
+  return {reason:`marketplace data API HTTP ${status}`, global:status === 429, event};
+}
 function diagnosticFilePart(value) {
   return String(value || 'unknown').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'unknown';
 }
@@ -258,6 +300,7 @@ async function captureBlockDiagnostic(page, response, evidence, stage, collectio
     page_url: safeDiagnosticUrl(page.url?.()),
     collection: sanitizeDiagnosticText(collection?.name).slice(0, 120),
     rarity: collection?.rarity || 'Exotic',
+    ...(Array.isArray(evidence.network_evidence) && evidence.network_evidence.length ? {network_evidence:evidence.network_evidence.slice(-30)} : {}),
     detail_file: detailFile,
     ...(screenshotSaved ? {screenshot_file:screenshotFile} : {screenshot_error:screenshotError || 'screenshot unavailable'}),
   };
@@ -266,12 +309,13 @@ async function captureBlockDiagnostic(page, response, evidence, stage, collectio
   return diagnostic;
 }
 let hydrationDiagnosticCaptured = false;
-async function captureHydrationDiagnosticOnce(page, response, stage, collection, excerpt) {
+async function captureHydrationDiagnosticOnce(page, response, stage, collection, excerpt, networkEvidence = [], matchedSignal = `${stage} hydration timeout`) {
   if (hydrationDiagnosticCaptured) return null;
   hydrationDiagnosticCaptured = true;
   return captureBlockDiagnostic(page, response, {
-    matched_signal:`${stage} hydration timeout`,
+    matched_signal:matchedSignal,
     excerpt:sanitizeDiagnosticText(excerpt).slice(-500),
+    network_evidence:networkEvidence,
   }, `${stage}-hydration`, collection, RENDER_DIAGNOSTICS);
 }
 function priceFrom(text) {
@@ -345,7 +389,7 @@ function collectionRenderState(snapshot) {
   const hydrated = cards.filter(card => !card.has_progress && /\b(?:BUY\s+NOW|Highest bid|No bids yet|OPEN FOR BIDS)\b/i.test(String(card.text || '')));
   return {ready:explicit_empty || hydrated.length > 0, explicit_empty, cards:hydrated, body};
 }
-async function waitForCollectionEvidence(page, timeoutMs = HYDRATION_TIMEOUT_MS, readSnapshot = readCollectionSnapshot, httpStatus = null) {
+async function waitForCollectionEvidence(page, timeoutMs = hydrationTimeoutForRun(), readSnapshot = readCollectionSnapshot, httpStatus = null, networkMark = 0) {
   const polls = Math.max(1, Math.ceil(timeoutMs / 500));
   const deadline = Date.now() + timeoutMs;
   let last = {body:'', cards:[]};
@@ -354,6 +398,8 @@ async function waitForCollectionEvidence(page, timeoutMs = HYDRATION_TIMEOUT_MS,
     last = await readSnapshot(page);
     const block = blockEvidence(last.body, httpStatus);
     if (block) return {...collectionRenderState(last), block};
+    const api_failure = marketplaceApiFailure(marketplaceTelemetrySince(page, networkMark));
+    if (api_failure) return {...collectionRenderState(last), api_failure};
     const state = collectionRenderState(last);
     if (state.ready) return state;
     if (i + 1 < polls) await sleep(500);
@@ -366,7 +412,7 @@ function productRenderState(text) {
   const hasOffer = /\b(?:BUY\s+NOW|OPEN FOR BIDS|NOT FOR SALE|NOT LISTED)\b/i.test(product);
   return {ready:hasRarity && hasOffer, text:String(text || '')};
 }
-async function waitForProductEvidence(page, timeoutMs = HYDRATION_TIMEOUT_MS, readText = async p => p.locator('body').innerText({timeout:1000}).catch(() => ''), httpStatus = null) {
+async function waitForProductEvidence(page, timeoutMs = hydrationTimeoutForRun(), readText = async p => p.locator('body').innerText({timeout:1000}).catch(() => ''), httpStatus = null, networkMark = 0) {
   const polls = Math.max(1, Math.ceil(timeoutMs / 500));
   const deadline = Date.now() + timeoutMs;
   let text = '';
@@ -375,23 +421,32 @@ async function waitForProductEvidence(page, timeoutMs = HYDRATION_TIMEOUT_MS, re
     text = await readText(page);
     const block = blockEvidence(text, httpStatus);
     if (block) return {...productRenderState(text), ready:true, block};
+    const api_failure = marketplaceApiFailure(marketplaceTelemetrySince(page, networkMark));
+    if (api_failure) return {...productRenderState(text), api_failure};
     const state = productRenderState(text);
     if (state.ready) return state;
     if (i + 1 < polls) await sleep(500);
   }
   return {...productRenderState(text), ready:false, hydration_timeout:true};
 }
-async function extractObservation(page, collection, response, captureDiagnostic = captureBlockDiagnostic) {
+async function extractObservation(page, collection, response, captureDiagnostic = captureBlockDiagnostic, networkMark = 0) {
   const actualUrl = page.url();
   let status = null;
   try { status = response?.status?.(); } catch {}
-  const rendered = await waitForCollectionEvidence(page, HYDRATION_TIMEOUT_MS, readCollectionSnapshot, status);
+  const rendered = await waitForCollectionEvidence(page, hydrationTimeoutForRun(), readCollectionSnapshot, status, networkMark);
   const body = rendered.body;
   if (rendered.block) return { kind: 'GLOBAL_BLOCK', reason: 'explicit marketplace block evidence',
-    block_diagnostic: await captureDiagnostic(page, response, rendered.block, 'collection', collection) };
+    block_diagnostic: await captureDiagnostic(page, response, {...rendered.block, network_evidence:marketplaceTelemetrySince(page, networkMark)}, 'collection', collection) };
+  if (rendered.api_failure) {
+    const network = marketplaceTelemetrySince(page, networkMark);
+    const diagnostic = await captureHydrationDiagnosticOnce(page, response, 'collection', collection, body, network, rendered.api_failure.reason);
+    if (rendered.api_failure.global) return {kind:'GLOBAL_BLOCK', reason:rendered.api_failure.reason, block_diagnostic:diagnostic};
+    return {kind:'UNAVAILABLE', reason:rendered.api_failure.reason, actual_url:actualUrl,
+      ...(diagnostic ? {render_diagnostic:diagnostic} : {})};
+  }
   if (!sameFilteredUrl(actualUrl, collection.source_url)) return { kind: 'UNAVAILABLE', reason: 'unexpected filtered-URL redirect', actual_url: actualUrl };
   if (rendered.hydration_timeout) {
-    const diagnostic = await captureHydrationDiagnosticOnce(page, response, 'collection', collection, body);
+    const diagnostic = await captureHydrationDiagnosticOnce(page, response, 'collection', collection, body, marketplaceTelemetrySince(page, networkMark));
     return {kind:'UNAVAILABLE', reason:'collection card hydration timeout', actual_url:actualUrl,
       ...(diagnostic ? {render_diagnostic:diagnostic} : {})};
   }
@@ -423,21 +478,29 @@ async function extractObservation(page, collection, response, captureDiagnostic 
 async function verifyRarityTraits(page, listings, deadlineAt, rarity) {
   const active = [];
   for (const listing of listings) {
-    if (Date.now() + GAP_MS + PRODUCT_ATTEMPT_RESERVE_MS > deadlineAt) return { ok: false, reason: 'batch time budget reached before product rarity verification' };
+    if (Date.now() + GAP_MS + productAttemptReserveMs() > deadlineAt) return { ok: false, reason: 'batch time budget reached before product rarity verification' };
     // A product page is the definitive rarity check. This is also a marketplace
     // navigation, so it receives the same measured cooldown as collection URLs.
     await sleep(GAP_MS);
     try {
+      attachMarketplaceTelemetry(page);
+      const networkMark = markMarketplaceTelemetry(page);
       const response = await page.goto(listing.url, { waitUntil: 'domcontentloaded', timeout: 25000 });
       await sleep(LOAD_SETTLE_MS);
       let status = null;
       try { status = response?.status?.(); } catch {}
-      const rendered = await waitForProductEvidence(page, HYDRATION_TIMEOUT_MS, undefined, status);
+      const rendered = await waitForProductEvidence(page, hydrationTimeoutForRun(), undefined, status, networkMark);
       const text = rendered.text;
       if (rendered.block) return { ok: false, global: true, reason: 'explicit marketplace block evidence on product page',
-        block_diagnostic: await captureBlockDiagnostic(page, response, rendered.block, 'product', {name:listing.name, rarity}) };
+        block_diagnostic: await captureBlockDiagnostic(page, response, {...rendered.block, network_evidence:marketplaceTelemetrySince(page, networkMark)}, 'product', {name:listing.name, rarity}) };
+      if (rendered.api_failure) {
+        const network = marketplaceTelemetrySince(page, networkMark);
+        const diagnostic = await captureHydrationDiagnosticOnce(page, response, 'product', {name:listing.name, rarity}, text, network, rendered.api_failure.reason);
+        return {ok:false, global:rendered.api_failure.global, reason:rendered.api_failure.reason,
+          ...(rendered.api_failure.global ? {block_diagnostic:diagnostic} : diagnostic ? {render_diagnostic:diagnostic} : {})};
+      }
       if (rendered.hydration_timeout) {
-        const diagnostic = await captureHydrationDiagnosticOnce(page, response, 'product', {name:listing.name, rarity}, text);
+        const diagnostic = await captureHydrationDiagnosticOnce(page, response, 'product', {name:listing.name, rarity}, text, marketplaceTelemetrySince(page, networkMark));
         return {ok:false, reason:`product page hydration timeout for token ${listing.token_id}`,
           ...(diagnostic ? {render_diagnostic:diagnostic} : {})};
       }
@@ -492,13 +555,15 @@ async function observeWithRetries(page, collection, waitBeforeNav, deadlineAt, r
   let last = null;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const needsGap = attempt > 1 || waitBeforeNav();
-    if (Date.now() + (needsGap ? GAP_MS : 0) + COLLECTION_ATTEMPT_RESERVE_MS > deadlineAt) return { kind: 'UNAVAILABLE', reason: 'batch time budget reached before collection check', attempts: attempt - 1 };
+    if (Date.now() + (needsGap ? GAP_MS : 0) + collectionAttemptReserveMs() > deadlineAt) return { kind: 'UNAVAILABLE', reason: 'batch time budget reached before collection check', attempts: attempt - 1 };
     if (needsGap) await sleep(GAP_MS);
     try {
       if (page.isClosed?.() && recoverPage) page = await recoverPage(deadlineAt);
+      attachMarketplaceTelemetry(page);
+      const networkMark = markMarketplaceTelemetry(page);
       const response = await page.goto(collection.source_url, { waitUntil: 'domcontentloaded', timeout: 25000 });
       await sleep(LOAD_SETTLE_MS);
-      const result = await extractObservation(page, collection, response);
+      const result = await extractObservation(page, collection, response, captureBlockDiagnostic, networkMark);
       result.attempts = attempt;
       if (result.kind === 'GLOBAL_BLOCK') return result;
       if (result.kind === 'VERIFIED') {

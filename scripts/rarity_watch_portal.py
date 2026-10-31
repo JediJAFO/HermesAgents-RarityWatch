@@ -158,7 +158,7 @@ body{font:16px system-ui;max-width:900px;margin:0;padding:25px;background:#11182
             payload = content.replace("{token}", token).replace("{result}", html.escape(result)).encode()
             self.send_response(code)
             self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors http://127.0.0.1:8765")
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
