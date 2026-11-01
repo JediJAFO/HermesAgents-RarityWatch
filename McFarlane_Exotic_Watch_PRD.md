@@ -79,6 +79,6 @@ Offline review verified the 46-watch rarity totals programmatically, the five pr
 A future operational sign-off requires: a complete scheduled collection, heartbeat/delta delivery read-back, scheduler timezone/DST evidence, corrected backup dependency/import closure, and a verified private-state recovery procedure.
 
 <!-- automated-drift:start -->
-**Observed implementation fingerprint:** `142b639884291c85162107d1d6b8abd7dbaa10c8dc2f7f193dc241b78099e7bd`
+**Observed implementation fingerprint:** `b15a30d9448e3f5461a39ec63aa89afb24a01fc72ee94b2205171ae9812fe79a`
 **Automated drift status:** changed or unreviewed; substantive review required. Hash comparison is not a requirements review.
 <!-- automated-drift:end -->
