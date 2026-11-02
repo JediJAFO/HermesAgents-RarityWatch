@@ -1,6 +1,8 @@
 """Explicit source-only snapshots. No network in snapshot/verification modes."""
 from __future__ import annotations
 import argparse
+from contextlib import contextmanager
+import secrets
 import ast
 import hashlib
 import json
@@ -116,8 +118,9 @@ No automatically restored live state or end-to-end marketplace/delivery claim is
 
 def scan_docx(path):
     import zipfile
+    import io
     from xml.etree import ElementTree as ET
-    with zipfile.ZipFile(path) as package:
+    with zipfile.ZipFile(io.BytesIO(path) if isinstance(path, bytes) else path) as package:
         if package.testzip(): raise ValueError('Corrupt DOCX package')
         for name in package.namelist():
             if name.endswith(('.xml','.rels')):
@@ -180,6 +183,99 @@ def repository_gate(repo, git, names):
     if extras: raise RuntimeError('Legacy artifacts require explicit repository cleanup: '+', '.join(sorted(extras)))
     return sorted(deletions)
 
+# Frozen identities of the four legacy backup commits reviewed during repair.
+# Metadata is an additional check, never proof of backup ownership.
+REVIEWED_LEGACY_COMMITS = {
+    'sales': {'219b8242b4aeed49b4f7514897483116838d801c', '8873c7476e09643955130d004de1ab984b1c0cee'},
+    'exotic': {'616b0f6ea373b6afb98ab33f9d6388c99d580fac', '1eb02cb37e995cb5ecc403d9948df0552012610a'},
+}
+
+
+@contextmanager
+def publication_lock(repo):
+    """Serialize backup mutations; never recover or clear an existing owner."""
+    lock=repo/'.git/monitor-backup.lock'
+    token=secrets.token_hex(16)
+    try:
+        with lock.open('x',encoding='utf-8') as handle:
+            handle.write(token)
+    except FileExistsError as error:
+        raise RuntimeError('Backup publication is busy; existing lock retained') from error
+    try:
+        yield
+    finally:
+        if lock.is_file() and lock.read_text(encoding='utf-8')==token:
+            lock.unlink()
+
+
+def validate_backup_commit(kind, git, commit, names, deletions=()):
+    """Verify historical contents, not merely the current sanitized snapshot."""
+    record=git('show','--format=%s%n%an <%ae>%n%P','--no-patch',commit).splitlines()
+    if len(record)!=3 or not re.fullmatch(r'backup: '+re.escape(kind)+r' source snapshot \d{4}-\d{2}-\d{2}',record[0]) \
+            or record[1]!='Monitor backup <monitor@users.noreply.github.com>' \
+            or not re.fullmatch(r'[0-9a-f]{40}',record[2]):
+        raise RuntimeError('Unreviewed outstanding commit; refusing publication')
+    paths=set(git('diff-tree','--no-commit-id','--name-only','-r',commit).splitlines())
+    if not paths or paths-set(names)-set(deletions):
+        raise RuntimeError('Outstanding commit differs from approved source inventory')
+    raw_inventory=git('show',commit+':snapshot-manifest.json'); scan(raw_inventory)
+    inventory=json.loads(raw_inventory)
+    if set(inventory)!={'kind','files'}:raise RuntimeError('Unreviewed snapshot metadata')
+    files=inventory['files']
+    if inventory.get('kind')!=kind or not isinstance(files,dict) or set(files)-set(names):
+        raise RuntimeError('Outstanding snapshot inventory is not approved')
+    tree={}
+    for line in git('ls-tree','-r',commit).splitlines():
+        metadata,name=line.split('\t',1)
+        if metadata.split()[:2] not in (['100644','blob'],['100755','blob']):
+            raise RuntimeError('Unsafe outgoing Git tree entry')
+        tree[name]=metadata
+    if set(tree)-{'.gitignore'} != set(files)|{'snapshot-manifest.json'}:
+        raise RuntimeError('Outgoing Git tree differs from exact snapshot inventory')
+    for name,digest in files.items():
+        if Path(name).is_absolute() or '..' in Path(name).parts or name not in names:
+            raise RuntimeError('Unsafe outgoing snapshot path')
+        data=git('show',commit+':'+name,binary=True)
+        variants={data}
+        if Path(name).suffix in ('.py','.js','.json','.md','.yaml'):
+            # Git may normalize Windows CRLF text blobs to LF on commit.
+            lf=data.replace(bytes((13,10)),bytes((10,)))
+            variants.update((lf,lf.replace(bytes((10,)),bytes((13,10)))))
+        if digest not in {hashlib.sha256(value).hexdigest() for value in variants}:
+            raise RuntimeError('Outgoing snapshot hash mismatch')
+        if name.endswith('.docx'):
+            scan_docx(data)
+        elif Path(name).suffix in ('.py','.js','.json','.md','.yaml'):
+            text=data.decode('utf-8'); scan(text)
+            if name.endswith('.py'):ast.parse(text,filename=name)
+        else:
+            raise RuntimeError('Unreviewed outgoing artifact type')
+    return record[2]
+
+
+def outstanding_backup_commits(kind, git, names, owned=(), deletions=()):
+    if git('branch','--show-current')!='main':
+        raise RuntimeError('Backup repository must be on main')
+    head=git('rev-parse','HEAD')
+    remote=git('ls-remote','origin','refs/heads/main').split()
+    if len(remote)!=2 or not re.fullmatch(r'[0-9a-f]{40}',remote[0]) or remote[1]!='refs/heads/main':
+        raise RuntimeError('Cannot establish remote main')
+    if head==remote[0]:return head,remote[0],[]
+    git('merge-base','--is-ancestor',remote[0],head)
+    commits=git('rev-list','--reverse',remote[0]+'..'+head).splitlines()
+    if not commits:raise RuntimeError('Cannot establish outstanding backup history')
+    approved=set(REVIEWED_LEGACY_COMMITS.get(kind,()))|set(owned)
+    parent=remote[0]
+    for commit in commits:
+        if not re.fullmatch(r'[0-9a-f]{40}',commit) or commit not in approved:
+            raise RuntimeError('Outstanding commit has no reviewed backup ownership')
+        if validate_backup_commit(kind,git,commit,names,deletions)!=parent:
+            raise RuntimeError('Outstanding history is not a linear backup chain')
+        parent=commit
+    if parent!=head:raise RuntimeError('Outstanding history does not end at HEAD')
+    return head,remote[0],commits
+
+
 def backup_main(kind):
     parser=argparse.ArgumentParser()
     parser.add_argument('--snapshot',type=Path,help='Local source-only snapshot; no git/network')
@@ -187,31 +283,67 @@ def backup_main(kind):
     if args.snapshot:
         snapshot(kind,args.snapshot); print(f'Offline snapshot verified: {verify(args.snapshot)} artifacts'); return
     repo=Path(os.environ.get('MCFARLANE_'+kind.upper()+'_BACKUP_REPO',str(Path.home()/('Documents/HermesAgents-sanitized-backup' if kind=='exotic' else 'HermesAgents-MTDSalesAlerts'))))
-    today=datetime.now(ZoneInfo('America/New_York')).date().isoformat()
-    stamp=repo/'backup/.last-successful-backup-date'
-    reservation=repo/('backup/.push-attempt-'+today)
-    # Check before any repo/staging mutation, including pending commits.
-    if not daily_allowed(stamp,today) or not daily_allowed(reservation,today):
+    def capped():
+        today=datetime.now(ZoneInfo('America/New_York')).date().isoformat()
+        stamp=repo/'backup/.last-successful-backup-date'
+        reservation=repo/('backup/.push-attempt-'+today)
+        return today,stamp,reservation,(not daily_allowed(stamp,today) or reservation.exists())
+    if capped()[3]:
         print('Daily cap: backup already succeeded or push was attempted today; deferred.'); return
-    subprocess.run([os.sys.executable,str(HOME/'scripts/refresh-mcfarlane-prds.py')],check=True,timeout=120)
-    env=dict(os.environ,GIT_TERMINAL_PROMPT='0')
-    def git(*a): return subprocess.run(['git',*a],cwd=repo,env=env,text=True,capture_output=True,check=True,timeout=120).stdout.rstrip('\n')
-    with tempfile.TemporaryDirectory(prefix='monitor-snapshot-') as tmp:
-        names=snapshot(kind,Path(tmp)); verify(Path(tmp))
-        deletions=repository_gate(repo,git,names)
-        changed=[n for n in names if not (repo/n).exists() or (repo/n).read_bytes()!=(Path(tmp)/n).read_bytes()]
-        if not changed and not deletions:
-            print('No sanitized monitor changes to back up.'); return
-        for n in changed:
-            (repo/n).parent.mkdir(parents=True,exist_ok=True); shutil.copy2(Path(tmp)/n,repo/n)
-        git('add','-A','--',*(changed+deletions))
-        git('-c','user.name=Monitor backup','-c','user.email=monitor@users.noreply.github.com','commit','-m',f'backup: {kind} source snapshot {today}','--',*(changed+deletions))
-        reservation.parent.mkdir(parents=True,exist_ok=True)
-        # Fail closed on uncertain push outcome: no second attempt this ET day.
-        with reservation.open('x',encoding='utf-8') as handle:
-            handle.write(today+'\n')
-        git('push','origin','main')
-        if git('rev-parse','HEAD') != git('ls-remote','origin','refs/heads/main').split()[0]:
-            raise RuntimeError('Remote verification did not match local commit')
-        stamp.write_text(today+'\n',encoding='utf-8')
-        print('Sanitized source backup pushed and remote commit verified.')
+    with publication_lock(repo):
+        today,stamp,reservation,blocked=capped()
+        if blocked:
+            print('Daily cap: backup already succeeded or push was attempted today; deferred.'); return
+        subprocess.run([os.sys.executable,str(HOME/'scripts/refresh-mcfarlane-prds.py')],check=True,timeout=120)
+        env=dict(os.environ,GIT_TERMINAL_PROMPT='0')
+        def git(*a,binary=False):
+            out=subprocess.run(['git',*a],cwd=repo,env=env,text=not binary,capture_output=True,check=True,timeout=120).stdout
+            return out if binary else out.rstrip('\n')
+        ownership=repo/'.git/monitor-backup-owned-commits.json'
+        owned=json.loads(ownership.read_text(encoding='utf-8')) if ownership.exists() else []
+        if not isinstance(owned,list) or any(not isinstance(c,str) or not re.fullmatch(r'[0-9a-f]{40}',c) for c in owned):
+            raise RuntimeError('Invalid backup ownership record; review required')
+        with tempfile.TemporaryDirectory(prefix='monitor-snapshot-') as tmp:
+            names=snapshot(kind,Path(tmp)); verify(Path(tmp))
+            deletions=repository_gate(repo,git,names)
+            head,remote,pending=outstanding_backup_commits(kind,git,names,owned,deletions)
+            changed=[n for n in names if not (repo/n).exists() or (repo/n).read_bytes()!=(Path(tmp)/n).read_bytes()]
+            if not changed and not deletions and not pending:
+                print('No sanitized monitor changes; local backup is already published.'); return
+            # Recheck immediately before mutating; the lock serializes our jobs,
+            # while these checks also catch independently changed repository state.
+            if git('rev-parse','HEAD')!=head:raise RuntimeError('Backup HEAD changed during validation')
+            repository_gate(repo,git,names)
+            for n in changed:
+                (repo/n).parent.mkdir(parents=True,exist_ok=True); shutil.copy2(Path(tmp)/n,repo/n)
+            if changed or deletions:
+                git('add','-A','--',*(changed+deletions))
+                git('-c','user.name=Monitor backup','-c','user.email=monitor@users.noreply.github.com','commit','-m',f'backup: {kind} source snapshot {today}','--',*(changed+deletions))
+                created=git('rev-parse','HEAD')
+                if created==head or validate_backup_commit(kind,git,created,names,deletions)!=head:
+                    raise RuntimeError('New backup commit has unexpected ancestry')
+                # The created object must match the exact freshly verified bytes.
+                for name in names:
+                    actual=git('show',created+':'+name,binary=True); expected=(Path(tmp)/name).read_bytes()
+                    if Path(name).suffix in ('.py','.js','.json','.md','.yaml'):
+                        actual=actual.replace(bytes((13,10)),bytes((10,)))
+                        expected=expected.replace(bytes((13,10)),bytes((10,)))
+                    if actual!=expected:raise RuntimeError('New backup commit differs from verified snapshot')
+                pending.append(created);head=created
+                temporary=ownership.with_name(ownership.name+'.'+secrets.token_hex(8))
+                with temporary.open('x',encoding='utf-8') as handle:json.dump(pending,handle)
+                os.replace(temporary,ownership)
+            repository_gate(repo,git,names)
+            if git('rev-parse','HEAD')!=head:raise RuntimeError('Backup HEAD changed before publication')
+            # Re-evaluate the Eastern day at the actual attempt boundary.
+            today,stamp,reservation,blocked=capped()
+            if blocked:
+                print('Daily cap reached during preparation; outstanding backup retained.'); return
+            reservation.parent.mkdir(parents=True,exist_ok=True)
+            with reservation.open('x',encoding='utf-8') as handle:handle.write(today+'\n')
+            git('push','origin',head+':refs/heads/main')
+            observed=git('ls-remote','origin','refs/heads/main').split()
+            if len(observed)!=2 or observed!=[head,'refs/heads/main']:
+                raise RuntimeError('Remote verification did not match validated backup commit')
+            stamp.write_text(today+'\n',encoding='utf-8')
+            print('Sanitized source backup pushed and remote commit verified.')

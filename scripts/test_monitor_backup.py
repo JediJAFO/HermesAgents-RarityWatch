@@ -90,18 +90,19 @@ class BackupTests(unittest.TestCase):
     def test_entrypoint_no_change_does_not_commit_or_push(self):
         import subprocess
         with tempfile.TemporaryDirectory() as d:
-            root=Path(d); b.snapshot('sales',root)
+            root=Path(d); b.snapshot('sales',root); (root/'.git').mkdir()
             calls=[]
             def offline(command,**kwargs):
                 calls.append(command)
                 if command[0]=='git':
-                    self.assertIn(command[1],('status','ls-files'))
-                    return subprocess.CompletedProcess(command,0,stdout='',stderr='')
+                    self.assertIn(command[1],('status','ls-files','branch','rev-parse','ls-remote'))
+                    out = ('main' if command[1]=='branch' else 'a'*40 if command[1]=='rev-parse' else 'a'*40+'\trefs/heads/main' if command[1]=='ls-remote' else '')
+                    return subprocess.CompletedProcess(command,0,stdout=out,stderr='')
                 self.assertTrue(command[1].endswith('refresh-mcfarlane-prds.py'))
                 return subprocess.CompletedProcess(command,0,stdout='',stderr='')
             with patch.dict('os.environ',{'MCFARLANE_SALES_BACKUP_REPO':d}), patch('sys.argv',['backup']), patch.object(b.subprocess,'run',side_effect=offline):
                 b.backup_main('sales')
-            self.assertEqual([c[1] for c in calls if c[0]=='git'],['ls-files','status'])
+            self.assertEqual([c[1] for c in calls if c[0]=='git'],['ls-files','status','branch','rev-parse','ls-remote'])
             self.assertFalse((root/'backup').exists())
 
     def test_docx_private_metadata_rejected(self):

@@ -11,7 +11,7 @@
   "sales": {
     "prd": "McFarlane_DC_Sales_Alerts_PRD",
     "scripts": ["run_mtd_sales_monitor.py", "retry_mtd_http400.py", "send_mtd_whatsapp_sales_only.py", "send_mtd_8am_last_five_heartbeat.py", "enrich_mtd_dc_metadata.py", "backup-mtd-sales-alerts.py"],
-    "price-watches": ["run_mcfarlane_dc_sales.py", "mcfarlane_wallet_aliases.py"]
+    "price-watches": ["run_mcfarlane_dc_sales.py", "mcfarlane_wallet_aliases.py", "mtd_sales_history.py"]
   },
   "shared_scripts": ["monitor_backup.py", "monitor_backup_manifest.json", "refresh-mcfarlane-prds.py", "test_monitor_backup.py", "audit_mtd_wallet_aliases.py", "test_audit_mtd_wallet_aliases.py", "report_mtd_wallet_alias_audit.py", "test_report_mtd_wallet_alias_audit.py"]
 }
