@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from exotic_execution_lock import run_locked, BUSY
 from recover_isolated_monitor_chrome import recover_isolated_browser
+from mtd_completion_shared_view import shared_completion_enabled, shared_source_preflight
 
 STATE = Path(r"__HERMES_HOME__/price-watches/mcfarlane-exotics.json")
 COLLECTOR = Path(r"__HERMES_HOME__/scripts/run_mcfarlane_exotic_deterministic.py")
@@ -61,6 +62,8 @@ def run_deferred_primary() -> int:
         return 0
     generation = marker.get('generation')
     occurrence = marker.get('occurrence')
+    if not shared_source_preflight(occurrence):
+        return BUSY
     environment = os.environ.copy()
     if isinstance(occurrence, dict):
         environment['MCFARLANE_DEFERRED_PRIMARY_OCCURRENCE'] = json.dumps(occurrence, separators=(',', ':'))
@@ -165,7 +168,7 @@ def main() -> int:
         environment["MCFARLANE_WATCH_KEYS"] = "|,|".join(keys)
     else:
         environment["MCFARLANE_COLLECTION_NAMES"] = "|".join(names)
-    if outcome.get("shared_failure") == "local_browser_cdp_timeout":
+    if not shared_completion_enabled() and outcome.get("shared_failure") == "local_browser_cdp_timeout":
         try:
             recover_isolated_browser()
         except (OSError, RuntimeError):

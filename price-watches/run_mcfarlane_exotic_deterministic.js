@@ -106,6 +106,35 @@ function atomicText(file, value) {
   fs.writeFileSync(tmp, value, 'utf8');
   fs.renameSync(tmp, file);
 }
+function sharedCompletionEnabled() {
+  let text;
+  try { text = fs.readFileSync(path.join(ROOT, 'mtd-shared-listings-config.json'), 'utf8'); }
+  catch (error) { if (error.code === 'ENOENT' || error.message === 'missing fixture') return false; throw error; }
+  return JSON.parse(text).completion === true;
+}
+function sharedCompletionResults(collections) {
+  let rows = [];
+  try { rows = JSON.parse(fs.readFileSync(process.env.MCFARLANE_SHARED_COMPLETION_VIEW, 'utf8')).results || []; } catch {}
+  return collections.map(c => {
+    const key = c.watch_key || watchKey(c);
+    const matches = rows.filter(r => r.watch_key === key);
+    const r = matches.length === 1 ? matches[0] : null;
+    if (!r || r.kind !== 'VERIFIED' || !r.source_generation
+      || !Number.isFinite(Date.parse(r.source_started_at)) || !Number.isFinite(Date.parse(r.source_observed_at))
+      || Date.parse(r.source_started_at) > Date.parse(r.source_observed_at)
+      || !r.baseline || !Array.isArray(r.baseline.listings)
+      || r.baseline.listing_count !== r.baseline.listings.length) {
+      return {name:c.name, contract:c.contract, rarity:c.rarity, watch_key:key, kind:'UNAVAILABLE', reason:r?.reason || 'shared listing source not ready'};
+    }
+    return {...r, name:c.name, contract:c.contract, rarity:c.rarity, watch_key:key};
+  });
+}
+function independentSharedObservation(prior, current) {
+  return Boolean(prior && current && prior.source_generation && current.source_generation
+    && prior.source_generation !== current.source_generation
+    && Date.parse(current.source_started_at) > Date.parse(prior.source_started_at)
+    && Date.parse(current.source_observed_at) > Date.parse(prior.source_observed_at));
+}
 function canonical(x) { return JSON.stringify(x); }
 function sameFilteredUrl(actual, expected) {
   try {
@@ -668,7 +697,15 @@ function dailyHeartbeatDate(state, outcome) {
   const instant = new Date(occurrence.scheduled_at);
   if (!Number.isFinite(instant.getTime())) return null;
   const p = Object.fromEntries(ET.formatToParts(instant).map(x => [x.type,x.value]));
-  if (p.hour !== '09' || p.minute !== '00' || p.second !== '00') return null;
+  let hour = 9, minute = 0;
+  if (sharedCompletionEnabled()) {
+    const config = JSON.parse(fs.readFileSync(path.join(ROOT, 'mtd-shared-listings-config.json'), 'utf8'));
+    if (Number.isInteger(config.completion_daily_hour) && config.completion_daily_hour >= 0 && config.completion_daily_hour <= 23) hour = config.completion_daily_hour;
+    if (Number.isInteger(config.completion_daily_minute) && config.completion_daily_minute >= 0 && config.completion_daily_minute <= 59) minute = config.completion_daily_minute;
+    if (occurrence.daily_heartbeat === false) return null;
+  }
+  const pinnedMorning = sharedCompletionEnabled() && occurrence.daily_heartbeat === true;
+  if (!pinnedMorning && (Number(p.hour) !== hour || Number(p.minute) !== minute || p.second !== '00')) return null;
   const date = `${p.year}-${p.month}-${p.day}`;
   return state.discord_daily_heartbeat?.date >= date ? null : date;
 }
@@ -781,7 +818,8 @@ function armDailyHeartbeat(state, outcome) {
   const date = dailyHeartbeatDate(state, outcome);
   if (date && (!state.pending8am || state.pending8am.date < date)) {
     const occurrence = JSON.parse(process.env.MCFARLANE_PRIMARY_OCCURRENCE);
-    state.pending8am = {date, generation:state.last_primary_exotic_run_id, execution_id:occurrence.execution_id, scheduled_at:occurrence.scheduled_at, required_observation_at:outcome.at, armed_at:outcome.at};
+    const required = sharedCompletionEnabled() && occurrence.source_min_started_at ? occurrence.source_min_started_at : outcome.at;
+    state.pending8am = {date, generation:state.last_primary_exotic_run_id, execution_id:occurrence.execution_id, scheduled_at:occurrence.scheduled_at, required_observation_at:required, armed_at:outcome.at};
   }
 }
 function claimDailyHeartbeat(state, outcome) {
@@ -900,6 +938,11 @@ async function main() {
     if (process.argv?.includes('--observe-onboarding-entry')) {
       const entry = migrateWatchState({collections:[JSON.parse(process.env.MCFARLANE_ONBOARD_ENTRY || '{}')]}).collections[0];
       if (!/^0x[0-9a-f]{40}$/.test(entry.contract) || !isSupportedRarity(entry.rarity)) throw new Error('invalid onboarding entry');
+      if (sharedCompletionEnabled()) {
+        const observation = sharedCompletionResults([entry])[0];
+        process.stdout.write(JSON.stringify({...observation, observed_at:observation.source_observed_at}));
+        return;
+      }
       let browser, page;
       try {
         browser = await chromium.connectOverCDP(CDP, {timeout:20000});
@@ -957,6 +1000,11 @@ async function collectMain() {
   const selectedKeys = new Set(selectedCollections.map(c => c.watch_key || watchKey(c)));
   const outstanding = run.scope === 'targeted'
     ? (state.last_monitor_outcome?.failed_collections || []).filter(x => !selectedKeys.has(x.watch_key || watchKey(x))) : [];
+  const useShared = sharedCompletionEnabled();
+  if (useShared) {
+    run.collector = 'shared-saved-listings-v1';
+    run.results = sharedCompletionResults(selectedCollections);
+  } else {
   try {
     browser = await chromium.connectOverCDP(CDP, { timeout: 20000 });
     const context = browser.contexts()[0];
@@ -1017,6 +1065,7 @@ async function collectMain() {
       browser ? boundedCleanup(() => browser.close()) : Promise.resolve(),
     ]);
   }
+  } // Legacy browser source remains available only behind the disabled shared flag.
   atomicJson(RUN, run);
   if (run.global_stop || run.fatal_error || run.results.length !== selectedCollections.length) {
     const reason = run.global_reason || run.fatal_error || 'incomplete deterministic result set';
@@ -1041,10 +1090,15 @@ async function collectMain() {
 
   const failures = [...outstanding], changed = [], discordChanges = [], whatsappChanges = [];
   const candidates = state.pending_exotic_change_candidates || {};
+  const provenance = state.pending_exotic_candidate_sources || {};
   for (const collection of state.collections) {
     const key = collection.watch_key || watchKey(collection);
     const result = run.results.find(x => (x.watch_key || watchKey(x)) === key);
     if (!result) continue;
+    if (useShared && result.kind === 'VERIFIED' && Date.parse(result.source_observed_at) < Date.parse(collection.last_successful_observation)) {
+      failures.push({name:collection.name, contract:collection.contract, rarity:collection.rarity, watch_key:key, type:'shared listing source older than last successful observation'});
+      continue;
+    }
     if (result.kind !== 'VERIFIED') { failures.push({ name: collection.name, contract:collection.contract, rarity:collection.rarity, watch_key:key, type: result.reason || 'local failure' }); continue; }
     const prior = collection.baseline || { for_sale: false, listing_count: 0, listings: [] };
     const stableBaseline = stabilizeListingNames(prior, result.baseline);
@@ -1052,9 +1106,9 @@ async function collectMain() {
     if (!collection.baseline) {
       collection.baseline = stableBaseline;
       collection.baseline_status = 'verified';
-      collection.last_successful_observation = run.at;
+      collection.last_successful_observation = useShared ? result.source_observed_at : run.at;
       delete collection.onboarding_failure;
-      delete candidates[key];
+      delete candidates[key]; delete provenance[key];
       continue;
     }
     const candidateFingerprint = canonical(comparableBaseline(stableBaseline));
@@ -1062,27 +1116,31 @@ async function collectMain() {
       // Promote a change only after the same normalized observation appears in
       // two independent interval runs. This avoids an extra slow browser pass
       // and makes a transient card/render defect incapable of alerting.
-      if (candidates[key] === candidateFingerprint) {
+      if (candidates[key] === candidateFingerprint && (!useShared || independentSharedObservation(provenance[key], result))) {
         changed.push(key);
         whatsappChanges.push(...whatsappPolicy.confirmedEvents(collection, prior, stableBaseline, run.at));
         const currentTokens = new Set(stableBaseline.listings.map(x => String(x.token_id)));
         discordChanges.push({ name: collection.name, contract:collection.contract, rarity:collection.rarity, watch_key:key, at: run.at,
           removed_listings: (prior.listings || []).filter(x => !currentTokens.has(String(x.token_id))) });
         collection.baseline = stableBaseline;
-        collection.last_successful_observation = run.at;
-        delete candidates[key];
+        collection.last_successful_observation = useShared ? result.source_observed_at : run.at;
+        delete candidates[key]; delete provenance[key];
       } else {
+        if (!useShared || candidates[key] !== candidateFingerprint || !provenance[key]) {
+          provenance[key] = useShared ? {source_generation:result.source_generation, source_started_at:result.source_started_at, source_observed_at:result.source_observed_at} : null;
+        }
         candidates[key] = candidateFingerprint;
         failures.push({ name: collection.name, contract:collection.contract, rarity:collection.rarity, watch_key:key, type: 'candidate listing change held for next-interval confirmation' });
       }
       continue;
     }
-    delete candidates[key];
+    delete candidates[key]; delete provenance[key];
     // Seller enrichment is display data, not an alert-worthy listing change.
     collection.baseline = stableBaseline;
-    collection.last_successful_observation = run.at;
+    collection.last_successful_observation = useShared ? result.source_observed_at : run.at;
   }
   state.pending_exotic_change_candidates = candidates;
+  if (useShared || state.pending_exotic_candidate_sources) state.pending_exotic_candidate_sources = provenance;
   const outcome = { at: run.at, complete: failures.length === 0, changed: changed.length > 0, scope: run.scope, run_kind: run.run_kind, failed_collections: failures, collector: run.collector, discord_changes: discordChanges };
   state.last_monitor_outcome = outcome;
   const deliver = recordPartialDeliveryPolicy(state, outcome);

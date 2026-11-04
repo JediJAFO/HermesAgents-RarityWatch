@@ -6,7 +6,8 @@ import os
 import sqlite3
 from pathlib import Path
 from contextlib import closing
-from exotic_execution_lock import run_locked
+from exotic_execution_lock import run_locked, BUSY
+from mtd_completion_shared_view import shared_completion_enabled, saved_view_environment, saved_environment_ready
 
 
 def scheduled_heartbeat_context(env=None, ledger=None, ancestor_pids=None):
@@ -42,8 +43,15 @@ def scheduled_heartbeat_context(env=None, ledger=None, ancestor_pids=None):
         owned = [r for r in rows if r[1] in ancestor_pids and
                  (env.get('HERMES_CRON_SESSION') == '1' or r[1] == direct_parent)]
         if len(owned) == 1 and owned[0][2]:
-            return {'execution_id': owned[0][0], 'scheduled_at': owned[0][2]}
-    except (OSError, sqlite3.Error, ImportError):
+            from mtd_shared_listing_schedule import pin_occurrence, enabled, _primary_requirement
+            occurrence = {'execution_id': owned[0][0], 'scheduled_at': owned[0][2]}
+            if not enabled('completion'):
+                return occurrence
+            minimum, original = _primary_requirement('completion:' + str(owned[0][0]), occurrence, 'completion')
+            result = pin_occurrence(original, 'completion', legacy='source_min_started_at' not in original)
+            result['source_min_started_at'] = minimum
+            return result
+    except (OSError, sqlite3.Error, ImportError, ValueError, TypeError, KeyError):
         return None
     return None
 
@@ -66,7 +74,8 @@ def deferred_primary_context(env=None):
         return None
     if not isinstance(scheduled_at, str) or not scheduled_at or not scheduled_at.endswith(('Z', '+00:00')):
         return None
-    return {'execution_id': execution_id, 'scheduled_at': scheduled_at}
+    from mtd_shared_listing_schedule import pin_occurrence
+    return pin_occurrence(occurrence, 'completion', legacy='source_min_started_at' not in occurrence)
 
 
 def main():
@@ -76,6 +85,24 @@ def main():
     occurrence = deferred_primary_context()
     if occurrence is None:
         occurrence = scheduled_heartbeat_context()
+    if shared_completion_enabled():
+        state_path = Path(__file__).resolve().parents[1] / 'price-watches' / 'mcfarlane-exotics.json'
+        state = json.loads(state_path.read_text(encoding='utf-8'))
+        selected = state['collections']
+        keys = set(child_env.get('MCFARLANE_WATCH_KEYS', '').split('|,|')) - {''}
+        names = set(child_env.get('MCFARLANE_COLLECTION_NAMES', '').split('|')) - {''}
+        if keys or names:
+            selected = [c for c in selected if (str(c.get('contract','')).lower()+'|'+c.get('rarity','Exotic') in keys if keys else c.get('name') in names)]
+        with saved_view_environment(selected, child_env) as prepared:
+            bundle = json.loads(Path(prepared['MCFARLANE_SHARED_COMPLETION_VIEW']).read_text(encoding='utf-8'))
+            if not saved_environment_ready(bundle, state, occurrence):
+                return BUSY
+            return _run_collector(command, prepared, occurrence)
+    child_env.pop('MCFARLANE_SHARED_COMPLETION_VIEW', None)
+    return _run_collector(command, child_env, occurrence)
+
+
+def _run_collector(command, child_env, occurrence):
     if occurrence:
         child_env['MCFARLANE_PRIMARY_OCCURRENCE'] = json.dumps(occurrence)
         subprocess.run(command + ['--arm-scheduled-heartbeat'], env=child_env,

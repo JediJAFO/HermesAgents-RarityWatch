@@ -102,6 +102,9 @@ def _default_metadata(contract: str) -> dict[str, Any]:
             return {"name": exact["name"], "metadata_source": "exact local MTD catalog"}
     except (OSError, ValueError):
         pass
+    from mtd_completion_shared_view import shared_completion_enabled
+    if shared_completion_enabled():
+        raise RuntimeError("saved metadata unavailable; request shared coverage before onboarding")
     url = f"https://api.rarible.org/v0.1/collections/POLYGON:{contract}"
     headers = {"Accept": "application/json", "User-Agent": "Mozilla/5.0 (Hermes rarity watch manager)"}
     if os.environ.get("RARIBLE_API_KEY"):
@@ -115,6 +118,10 @@ def _default_metadata(contract: str) -> dict[str, Any]:
 
 
 def _default_baseline(entry: dict[str, Any]) -> dict[str, Any]:
+    from mtd_completion_shared_view import shared_completion_enabled, completion_results
+    if shared_completion_enabled():
+        result = completion_results([entry])["results"][0]
+        return {**result, "observed_at":result.get("source_observed_at")}
     env = dict(os.environ, MCFARLANE_ONBOARD_ENTRY=json.dumps(entry, separators=(",", ":")))
     completed = subprocess.run(
         [str(NODE), str(COLLECTOR), "--observe-onboarding-entry"], env=env,

@@ -102,7 +102,8 @@ def status():
     state=json.loads(STATE.read_text(encoding='utf-8'))
     pending=state.get('pending8am')
     outcome=state.get('last_monitor_outcome') or {}
-    scheduled=datetime.fromisoformat(pending['scheduled_at'].replace('Z','+00:00')) if pending else None
+    required=(pending.get('required_observation_at') or pending['scheduled_at']) if pending else None
+    scheduled=datetime.fromisoformat(required.replace('Z','+00:00')) if pending else None
     rows=state.get('collections',[])
     ready=bool(pending and pending['date']==datetime.now(ET).date().isoformat()
                and (state.get('discord_daily_heartbeat') or {}).get('date','') < pending['date']
