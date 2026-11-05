@@ -1,8 +1,8 @@
 {
   "kind": "exotic",
   "files": {
-    "McFarlane_Exotic_Watch_PRD.docx": "4e9e79be3e78587eceb0b11914ca1dbf7a77958a9a7a9fccfbbbedd668024ab8",
-    "McFarlane_Exotic_Watch_PRD.md": "39f3d798f8b91dbfdba4c6e5a65d0a8f18d8ccde49081cb8a035c68647b471d8",
+    "McFarlane_Exotic_Watch_PRD.docx": "d9960df01dcc57e391fd060a22ebe575162d4715ea2f1f2ea77e1e6723a7e01a",
+    "McFarlane_Exotic_Watch_PRD.md": "1da3008e43d9d9c9b969594c38990b452598189718a6d8f2cd9e536878422499",
     "RESTORE.md": "ef8726768470b1038a5d1e464377f59b29c258f0ee7b27f003d93d2a31cb90d1",
     "plugins/rarity-watch-manager/__init__.py": "84d77271ac0151955aca9b156c5ed9f1439fe813f63f6d76a66cf811c1f5402d",
     "plugins/rarity-watch-manager/dashboard/manifest.json": "c3df86f49873aab5bcd53d1e5773e7aa448cb0b4de1ace492f8054458abf2e21",
@@ -24,7 +24,7 @@
     "scripts/monitor_backup.py": "96741bbd1ec774451fad8ab3f9cecd7f7153c1901a292fec1adf475c8624a1c8",
     "scripts/monitor_backup_manifest.json": "82e333bf7d9d1ded31f220f47a30654d1f801aaca8f93f8e78ca84d3808548fd",
     "scripts/rarity_watch_manager.py": "099d2c3ffb067817b0384c055a4bd7649bc27aae1d68277f70bc51c557dce0f3",
-    "scripts/rarity_watch_portal.py": "5a463edd3293b3ade8a669cad7daace7473ea8a699ad6238ef399943c72f1419",
+    "scripts/rarity_watch_portal.py": "1272a03f81725b5a0a1a11382d2d2179133e493761493e3bf78b1b940c58c167",
     "scripts/recover_isolated_monitor_chrome.py": "d7fb3a3b733049f5a0c357c3eea01f7aafc7e15ac9f0bd171b43dbc4a2ee8858",
     "scripts/refresh-mcfarlane-prds.py": "0ca2f6e7f603a59247b77f1c361725b8737a9099032bf1fc4f7ddb71528c8033",
     "scripts/refresh_exotic_current_pol_usd.py": "869c9b3af898874526213f46de486facc37892b99bf888d02dcdd3fa4e865832",
