@@ -79,6 +79,46 @@ Offline review verified the 46-watch rarity totals programmatically, the five pr
 A future operational sign-off requires: a complete scheduled collection, heartbeat/delta delivery read-back, scheduler timezone/DST evidence, corrected backup dependency/import closure, and a verified private-state recovery procedure.
 
 <!-- automated-drift:start -->
-**Observed implementation fingerprint:** `eb1ff46343481a1c7482fbbce62ec04b11007ccd8ab7afca96c73086e529863c`
+**Observed implementation fingerprint:** `89bffb8f92a8db8f8fb356f493c5921f8112782c32c0d0e856cdff8defdb4b5e`
 **Automated drift status:** changed or unreviewed; substantive review required. Hash comparison is not a requirements review.
 <!-- automated-drift:end -->
+
+## Source-only reconciliation — November 5, 2026
+
+The current package includes the shared listing producer, scheduler, rarity client and Completion saved projection. Completion and lowest/sniper consumers retain their own confirmation, obligation and delivery state; a shared observation is not a delivery acknowledgement. The under-100 engine and wrappers are included as shared supporting source.
+
+The earlier dated review above is historical; its saved counts, schedules, test totals and blanket backup-gap statements are not current acceptance claims. This addendum verifies current source membership and schedule projection only, not every historical behavioral statement. The comprehensive explicit manifest now covers this family. Private runtime state and captured provider data remain excluded. Read RESTORE.md for observed pinned dependencies, offline isolation and disabled-job restoration. No new DOCX, live provider request, notification, migration or backup publication was performed during reconciliation. Detailed behavioral re-review and a clean-host rebuild remain separate gates.
+
+### Current family source coverage
+
+- `scripts/run_mcfarlane_exotic_deterministic.py`
+- `scripts/run_mcfarlane_exotic_scheduled.py`
+- `scripts/run_mcfarlane_exotic_whatsapp.py`
+- `scripts/run-mcfarlane-exotic-whatsapp.js`
+- `scripts/confirm_priority_exotic_listing_candidates.py`
+- `scripts/retry_mcfarlane_exotic_failures.py`
+- `scripts/recover_isolated_monitor_chrome.py`
+- `scripts/enrich_exotic_last_sales.py`
+- `scripts/refresh_exotic_current_pol_usd.py`
+- `scripts/deliver_exotic_owed_heartbeat.py`
+- `scripts/rarity_watch_manager.py`
+- `scripts/rarity_watch_portal.py`
+- `scripts/run_rarity_update_and_heartbeat.py`
+- `scripts/test_run_rarity_update_and_heartbeat.py`
+- `scripts/test_rarity_watch_manager.py`
+- `scripts/test_rarity_watch_portal.py`
+- `scripts/test_rarity_watch_plugin_api.py`
+- `price-watches/run_mcfarlane_exotic_deterministic.js`
+- `price-watches/exotic_whatsapp_policy.js`
+- `price-watches/rarity_watch_discord_delivery.py`
+- `price-watches/test_rarity_collector.js`
+- `price-watches/test_exotic_certificate.js`
+- `price-watches/test_exotic_reliability.js`
+- `price-watches/test_exotic_integration.js`
+- `plugins/rarity-watch-manager/plugin.yaml`
+- `plugins/rarity-watch-manager/__init__.py`
+- `plugins/rarity-watch-manager/dashboard/manifest.json`
+- `plugins/rarity-watch-manager/dashboard/plugin_api.py`
+- `plugins/rarity-watch-manager/desktop/plugin.js`
+- `price-watches/test_exotic_discord_delta.js`
+- `price-watches/test_exotic_whatsapp_delta.js`

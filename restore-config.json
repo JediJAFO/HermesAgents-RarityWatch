@@ -38,6 +38,18 @@
       "delivery": "CONFIGURE_PRIVATELY"
     },
     {
+      "script": "launch_mtd_listing_wallets.py",
+      "schedule": {
+        "kind": "cron",
+        "expr": "35,50 1,8,9,13,17,21 * * *"
+      },
+      "configured_enabled": true,
+      "enabled": false,
+      "no_agent": true,
+      "timezone": "America/New_York",
+      "delivery": "CONFIGURE_PRIVATELY"
+    },
+    {
       "script": "retry_mcfarlane_exotic_failures.py",
       "schedule": {
         "kind": "cron",

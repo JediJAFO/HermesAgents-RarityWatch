@@ -63,6 +63,10 @@ def sanitized_source(text):
     # Restored sources are materialized only after operator selects a new root.
     text=text.replace(HOME.as_posix(),'__HERMES_HOME__').replace(str(HOME).replace('\\','/'),'__HERMES_HOME__')
     text=text.replace('__DOCUMENTS__','__DOCUMENTS__').replace('__USER_HOME__','__USER_HOME__')
+    # Expanded shared-source closure contains deployment-only collection and
+    # destination declarations; preserve source, never literal private scope.
+    text=re.sub(r"0x[0-9a-fA-F]{40}", '__PRIVATE_WALLET_OR_CONTRACT__', text)
+    text=re.sub(r"(?<![A-Za-z0-9])[0-9]{17,20}(?![A-Za-z0-9])", '__PRIVATE_DESTINATION_ID__', text)
     # Hermes job identities are deployment inputs, not portable source values.
     text=re.sub(r"(?<=[\"'])[0-9a-f]{12}(?=[\"'])", '__PRIVATE_JOB_ID__', text)
     return text
@@ -73,7 +77,14 @@ def scan(text):
               r'(?i)(?:gh[pousr]_[a-zA-Z0-9]{20,}|sk-[a-zA-Z0-9]{20,})']
     if any(re.search(p,text) for p in patterns):
         raise ValueError('Snapshot privacy scan failed (value withheld)')
-    for host in re.findall(r'https?://([^/\s\"\'<>;,)}]+)',text):
+    # A quoted standard SVG namespace is an identifier, not a network target.
+    # Match the complete quoted URI; suffixes, other namespaces and W3 hosts
+    # remain subject to the ordinary URL rejection below.
+    url_text=re.sub(r"([\"'])http" r"://www\.w3\.org/2000/svg\1", r"\1\1", text)
+    # Likewise accept only complete quoted local Origin/console expressions,
+    # never a host prefix truncated at the closing interpolation brace.
+    url_text=re.sub(r"([\"'])http" r"://127\.0\.0\.1:\{(?:self\.server|server)\.server_port\}\1", r"\1\1", url_text)
+    for host in re.findall(r'https?://([^/\s\"\'<>;,)}]+)',url_text):
         if host.rstrip('.') not in {'127.0.0.1:8765','127.0.0.1:9222','[::1]:9222','api.coingecko.com','api.rarible.org','mcfarlanetoys.digital','discord.com'}:
             raise ValueError('Non-allowlisted URL in snapshot (value withheld)')
 
@@ -99,6 +110,7 @@ def snapshot(kind, target, docs=DOCS):
     instructions='''# Source-only restore — NOT a disaster-recovery state backup
 
 Keep every restored schedule disabled until private configuration and baseline validation are complete.
+Replace __PRIVATE_WALLET_OR_CONTRACT__ and __PRIVATE_DESTINATION_ID__ declarations only with independently verified private collection scope and delivery configuration; no embedded addresses or destinations are recovered. Never execute unresolved templates.
 Install Python 3.11+, python-docx, psutil and tzdata; Node.js and Playwright (install under HERMES_HOME/hermes-agent so the existing absolute module reference resolves). Install Chrome separately. No package binaries or dependency lockfiles are included: versions must be validated on the target host.
 
 Copy scripts/ and price-watches/ preserving their sibling layout. Materialize __HERMES_HOME__, __DOCUMENTS__, __USER_HOME__ in copied text files to forward-slash absolute target paths before execution. Do not run the templates in place. The production source uses fixed Windows paths; this explicit relocation step is required, including Node at HERMES_HOME/node/node.exe. Add Node to PATH for the WhatsApp wrapper. Review git repository paths separately before enabling backups.

@@ -149,6 +149,44 @@ class BackupTests(unittest.TestCase):
         self.assertIn('plugins/rarity-watch-manager/desktop/plugin.js',relative)
         self.assertIn('plugins/rarity-watch-manager/dashboard/plugin_api.py',relative)
 
+    def test_shared_closure_deployment_literals_redacted_not_scanner_exempted(self):
+        address='0x'+'a'*40
+        destination='9'*18
+        text=b.sanitized_source("collection='POLYGON:"+address+"';channel='"+destination+"'")
+        self.assertNotIn(address,text)
+        self.assertNotIn(destination,text)
+        self.assertIn('__PRIVATE_WALLET_OR_CONTRACT__',text)
+        self.assertIn('__PRIVATE_DESTINATION_ID__',text)
+        b.scan(text)
+        for raw in (address,destination):
+            with self.assertRaises(ValueError): b.scan(raw)
+
+    def test_only_exact_svg_namespace_and_local_port_expressions_allowed(self):
+        b.scan("NS='http://www.w3.org/2000/svg'")
+        b.scan('f"http://127.0.0.1:{self.server.server_port}"')
+        b.scan('f"http://127.0.0.1:{server.server_port}"')
+        for bad in ('http://'+'www.w3.org/other', 'http://'+'www.w3.org/2000/svg.evil',
+                    'http://'+'www.w3.org.evil/2000/svg',
+                    'http://'+'127.0.0.1:{server.other_port}',
+                    'http://'+'127.0.0.1:{self.server.server_port.evil}',
+                    'http://'+'127.0.0.1:{server.server_port}@evil.example',
+                    'http://'+'127.0.0.1:{self.server.server_port}@evil.example',
+                    'http://'+'127.0.0.1:{server.server_port}.evil',
+                    'http://'+'127.0.0.1:{self.server.server_port}/unexpected',
+                    'http://'+'127.0.0.1:8774', 'http://'+'user@127.0.0.1:8765'):
+            with self.subTest(url=bad),self.assertRaises(ValueError): b.scan("'"+bad+"'")
+
+    def test_exotic_launcher_and_finite_dynamic_closure(self):
+        # Explicit reviewed launcher, shared-worker and finite family dispatch.
+        required = {'scripts/launch_mtd_listing_wallets.py', 'scripts/mtd_completion_shared_view.py', 'scripts/mtd_nft_history_store.py', 'scripts/mtd_nft_history_provider.py', 'scripts/mtd_nft_history_local.py', 'scripts/mtd_listing_refresh.py', 'scripts/mtd_listing_details.py', 'scripts/mtd_shared_listing_source.py', 'scripts/mtd_nft_history_ui.py', 'scripts/mtd_shared_listing_schedule.py', 'scripts/mtd_wallet_graph.py', 'scripts/mtd_rarity_queue.py', 'scripts/mtd_wallet_transfer_analyzer.py', 'scripts/mtd_listing_wallets.py', 'scripts/mtd_shared_rarity_client.py', 'scripts/mtd_under100_sniper.py', 'scripts/mtd_wallet_graph_ui.py', 'price-watches/mtd_exotic_lowest_monitor.py', 'price-watches/mtd_legendary_lowest_monitor.py', 'scripts/mtd_supply.py'}
+        relative={p.relative_to(b.HOME).as_posix() for p in b.source_paths('exotic')}
+        self.assertFalse(required-relative, sorted(required-relative))
+        self.assertEqual({n for n in relative if n.endswith('.json')},
+                         {'scripts/monitor_backup_manifest.json',
+                          'plugins/rarity-watch-manager/dashboard/manifest.json'})
+        self.assertTrue(all(not j['enabled'] and j['delivery']=='CONFIGURE_PRIVATELY'
+                            for j in b.schedules('exotic')))
+
     def test_local_import_closure(self):
         # Resolve imports against actual sibling source modules without importing
         # runtime modules (several execute state/network work at import time).

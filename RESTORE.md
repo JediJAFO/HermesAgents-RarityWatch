@@ -1,6 +1,7 @@
 # Source-only restore — NOT a disaster-recovery state backup
 
 Keep every restored schedule disabled until private configuration and baseline validation are complete.
+Replace __PRIVATE_WALLET_OR_CONTRACT__ and __PRIVATE_DESTINATION_ID__ declarations only with independently verified private collection scope and delivery configuration; no embedded addresses or destinations are recovered. Never execute unresolved templates.
 Install Python 3.11+, python-docx, psutil and tzdata; Node.js and Playwright (install under HERMES_HOME/hermes-agent so the existing absolute module reference resolves). Install Chrome separately. No package binaries or dependency lockfiles are included: versions must be validated on the target host.
 
 Copy scripts/ and price-watches/ preserving their sibling layout. Materialize __HERMES_HOME__, __DOCUMENTS__, __USER_HOME__ in copied text files to forward-slash absolute target paths before execution. Do not run the templates in place. The production source uses fixed Windows paths; this explicit relocation step is required, including Node at HERMES_HOME/node/node.exe. Add Node to PATH for the WhatsApp wrapper. Review git repository paths separately before enabling backups.
