@@ -1,8 +1,8 @@
 {
   "kind": "exotic",
   "files": {
-    "McFarlane_Exotic_Watch_PRD.docx": "b7f1377388c58b9ececaaabba075e2e6bb9a4b35775d7766f6511393fcec4036",
-    "McFarlane_Exotic_Watch_PRD.md": "9204ad20364e397146a1b10b906618e98994ff77b9646561f442a6ae7992a039",
+    "McFarlane_Exotic_Watch_PRD.docx": "55bc972c0625fbafedfa17232887aad5e9e9d7c2d326127bea02dc9338074137",
+    "McFarlane_Exotic_Watch_PRD.md": "ace3d604f8b18d1b0208a1fa91e09b095b6fc7ceb12295bd504874b1d6838b44",
     "RESTORE.md": "0d85d15030655272a8073380e164c5287bc677d4b631f18101d2a937150155f2",
     "plugins/rarity-watch-manager/__init__.py": "84d77271ac0151955aca9b156c5ed9f1439fe813f63f6d76a66cf811c1f5402d",
     "plugins/rarity-watch-manager/dashboard/manifest.json": "c3df86f49873aab5bcd53d1e5773e7aa448cb0b4de1ace492f8054458abf2e21",
@@ -34,7 +34,7 @@
     "scripts/mtd_nft_history_provider.py": "2d9ca456e0ed85cbd63ffda2de9ae94e542af05d2f2859636d134e70a3a65275",
     "scripts/mtd_nft_history_store.py": "d224f846c5ec91d08c6d19de031c640df498de82f5c7cca0e680f15c62347164",
     "scripts/mtd_nft_history_ui.py": "72bed11ef7435dca428bbbc690f42e6c0a52726da810e0a6623f2aadd9cc1b6c",
-    "scripts/mtd_rarity_queue.py": "252c8ef078432d5f6452703c0636f3f88f9b6ee3323beb3b61c4d81f5885edae",
+    "scripts/mtd_rarity_queue.py": "b6cb2a2329efea38b9756f1b3fac2519a81c3704982c9cdabdb14c47d9204552",
     "scripts/mtd_shared_listing_schedule.py": "9d6de0c815384d87dad62561b00daa95084eee80b085538508c10b8f0d9b4fad",
     "scripts/mtd_shared_listing_source.py": "eca4a58146c51cfd757bf0bf6ddbac78a9332e46c6d7d74f7397adb941f0996c",
     "scripts/mtd_shared_rarity_client.py": "329133a837a3ed49febe90a4e53d32d83898c16dacab301523488619b40c40a4",

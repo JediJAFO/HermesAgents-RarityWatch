@@ -191,6 +191,10 @@ def save_item(db,raw,now):
     h=digest(raw)
     db.execute('INSERT OR IGNORE INTO metadata VALUES(?,?,?,?,?,?)',(asset,h,rarity,PROVIDER,encode(raw),utc(now)))
     prior=db.execute('SELECT m.* FROM metadata_current c JOIN metadata m ON m.asset=c.asset AND m.digest=c.digest WHERE c.asset=?',(asset,)).fetchone()
+    # A provider refresh is archived above, but cannot establish a changed
+    # on-chain URI. Original-chain facts require a new exact chain binding to
+    # supersede them; provider timestamps/versions are not original revisions.
+    if prior and prior['source']=='original_chain_metadata v1': return
     conflict=len(values)>1
     if prior and prior['source']==PROVIDER:
         old=json.loads(prior['raw']);old_item=old.get('item',old);old_order=metadata_order(old_item)
