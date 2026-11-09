@@ -98,8 +98,10 @@ def _default_metadata(contract: str) -> dict[str, Any]:
         catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
         exact = next((c for c in catalog.get("collections", [])
                       if str(c.get("contract", "")).lower() == contract), None)
-        if exact and exact.get("name"):
-            return {"name": exact["name"], "metadata_source": "exact local MTD catalog"}
+        if exact:
+            name = exact.get("name") or exact.get("display_name")
+            if name:
+                return {"name": name, "metadata_source": "exact local MTD catalog"}
     except (OSError, ValueError):
         pass
     from mtd_completion_shared_view import shared_completion_enabled

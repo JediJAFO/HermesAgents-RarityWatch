@@ -43,7 +43,7 @@
     "scripts/mtd_wallet_graph.py": "78fbcec3d9e2a83328c3f80a58e55c8bd2cbf935a8f358d8531fa362f16138fa",
     "scripts/mtd_wallet_graph_ui.py": "e82771d6468d7e7ee1befe71e38a5477f1627bbb0b03ce9fff914a3e054ca708",
     "scripts/mtd_wallet_transfer_analyzer.py": "d1c39cf9b3a21122ce326a4c7e9dc7496df4c0965e385fc5f6692b94d1a61e39",
-    "scripts/rarity_watch_manager.py": "099d2c3ffb067817b0384c055a4bd7649bc27aae1d68277f70bc51c557dce0f3",
+    "scripts/rarity_watch_manager.py": "fb7d1898a0227e20f3ed9202702906f41da459d018aee3891d5db9f99c278954",
     "scripts/rarity_watch_portal.py": "1272a03f81725b5a0a1a11382d2d2179133e493761493e3bf78b1b940c58c167",
     "scripts/recover_isolated_monitor_chrome.py": "d7fb3a3b733049f5a0c357c3eea01f7aafc7e15ac9f0bd171b43dbc4a2ee8858",
     "scripts/refresh-mcfarlane-prds.py": "0ca2f6e7f603a59247b77f1c361725b8737a9099032bf1fc4f7ddb71528c8033",
