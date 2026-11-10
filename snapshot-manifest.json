@@ -1,8 +1,8 @@
 {
   "kind": "exotic",
   "files": {
-    "McFarlane_Exotic_Watch_PRD.docx": "4ba4e95ef311a47bfd6d974736fd9bb36b3858199479391988c4ac4f4bf83af6",
-    "McFarlane_Exotic_Watch_PRD.md": "df02804a48d808b98538e929537283bceb2a0acf958f1e55cbd90624cadd8a79",
+    "McFarlane_Exotic_Watch_PRD.docx": "0733be4dcab8efaefea84680a627641a95d74c12e66912c6d721f268e6c1d108",
+    "McFarlane_Exotic_Watch_PRD.md": "46b6b6bc73b276c617b792db6dfc8f96fd3131a0d12c429887c2cb338c429fda",
     "RESTORE.md": "0d85d15030655272a8073380e164c5287bc677d4b631f18101d2a937150155f2",
     "plugins/rarity-watch-manager/__init__.py": "84d77271ac0151955aca9b156c5ed9f1439fe813f63f6d76a66cf811c1f5402d",
     "plugins/rarity-watch-manager/dashboard/manifest.json": "c3df86f49873aab5bcd53d1e5773e7aa448cb0b4de1ace492f8054458abf2e21",
