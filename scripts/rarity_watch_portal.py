@@ -128,6 +128,24 @@ def _resend_heartbeat(heartbeat_render: Callable[[], str],
             "monitor_refreshes": 0, "llm_tokens": 0}
 
 
+RARITY_DISPLAY_ORDER = ("Exotic", "Legendary", "Epic", "Rare", "Common", "Basic")
+
+
+def _format_saved_watches(result: dict[str, Any]) -> str:
+    watches = result.get("watches", [])
+    lines = [f"{result['count']} saved watch(es)"]
+    for rarity in RARITY_DISPLAY_ORDER:
+        group = sorted((watch for watch in watches if watch.get("rarity") == rarity),
+                       key=lambda watch: (str(watch.get("name") or "").casefold(),
+                                          str(watch.get("contract") or "")))
+        lines.extend(["", f"[{rarity}] {len(group)} watch(es)"])
+        lines.extend(f"{watch.get('enabled') and 'ON ' or 'OFF'} {watch.get('name')}  {watch.get('contract')}"
+                     for watch in group)
+    lines.extend(["", f"network calls: {result.get('network_calls', 0)}",
+                  f"notifications: {result.get('notifications', 0)}"])
+    return "\n".join(lines)
+
+
 def make_server(*, state_path: Path = STATE, lock_path: Path = LOCK,
                 execute_fn: Callable[..., dict[str, Any]] = _manager_execute,
                 port: int = 8767, csrf_path: Path = CSRF_SECRET,
@@ -151,7 +169,7 @@ body{font:16px system-ui;max-width:900px;margin:0;padding:25px;background:#11182
 </style></head><body><nav><a href="http://127.0.0.1:8765/" target="_top">← MTD Control Panel</a></nav><h1>Exotic / Legendary Watch Manager</h1><p>Zero LLM tokens. Add completes only after the baseline is verified; it enables subsequent interval/9AM heartbeat coverage and posts a read-back-verified availability result to Discord. If Discord is temporarily unavailable, the watch remains enabled and the result is shown as pending for an exact retry. Disable, Remove, List Saved, and Resend Heartbeat are saved-state only: no marketplace calls or monitor refresh.</p>
 <form method="post" action="/execute"><input type="hidden" name="csrf" value="{token}"><div class="grid">
 <label>Polygon contract<input name="contract" placeholder="0x + 40 hexadecimal characters"></label>
-<label>Rarity<select name="rarity"><option value="Exotic">Exotic</option><option value="Legendary">Legendary</option><option value="Epic">Epic</option><option value="Rare">Rare</option></select></label>
+<label>Rarity<select name="rarity"><option value="Exotic">Exotic</option><option value="Legendary">Legendary</option><option value="Epic">Epic</option><option value="Rare">Rare</option><option value="Basic">Basic</option><option value="Common">Common</option></select></label>
 <label>Optional display name<input name="display"></label><label>Optional category<input name="category"></label></div>
 <div class="actions"><button name="action" value="add">Add (Live)</button><button name="action" value="disable">Disable</button><button name="action" value="remove">Remove</button><button name="action" value="list" formnovalidate>List Saved</button><button name="action" value="update" formnovalidate>Run Update + Heartbeat</button><button name="action" value="confirm_pending" formnovalidate>Confirm Pending Listings</button><button name="action" value="update_status" formnovalidate>Update Status</button><button name="action" value="resend_heartbeat" formnovalidate>Resend Heartbeat</button></div></form>
 <h2>Result</h2><pre id="result" aria-live="polite">{result}</pre></body></html>'''
@@ -186,8 +204,8 @@ body{font:16px system-ui;max-width:900px;margin:0;padding:25px;background:#11182
                     rarity = data.get("rarity", [""])[0]
                     if not re.fullmatch(r"0x[0-9a-fA-F]{40}", contract):
                         raise ValueError("Polygon contract must be 0x followed by exactly 40 hexadecimal characters")
-                    if rarity not in {"Exotic", "Legendary", "Epic", "Rare"}:
-                        raise ValueError("rarity must be exactly Exotic, Legendary, Epic, or Rare")
+                    if rarity not in {"Exotic", "Legendary", "Epic", "Rare", "Basic", "Common"}:
+                        raise ValueError("rarity must be exactly Exotic, Legendary, Epic, Rare, Basic, or Common")
                     request.update(contract=contract, rarity=rarity)
                     if action == "add":
                         for field in ("display", "category"):
@@ -205,10 +223,7 @@ body{font:16px system-ui;max-width:900px;margin:0;padding:25px;background:#11182
                 else:
                     result = execute_fn(request, state_path=Path(state_path), lock_path=Path(lock_path))
                 if action == "list":
-                    rows = [f"{watch.get('enabled') and 'ON ' or 'OFF'} {watch.get('rarity')} {watch.get('name')}  {watch.get('contract')}" for watch in result.get("watches", [])]
-                    text = "\n".join([f"{result['count']} saved watch(es)", *rows,
-                                      f"network calls: {result.get('network_calls', 0)}",
-                                      f"notifications: {result.get('notifications', 0)}"])
+                    text = _format_saved_watches(result)
                 else:
                     text = json.dumps(result, indent=2)
                 self.page(text)

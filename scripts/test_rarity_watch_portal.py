@@ -68,6 +68,8 @@ class RarityWatchPortalTests(unittest.TestCase):
         self.assertIn('value="Legendary"', body)
         self.assertIn('value="Epic"', body)
         self.assertIn('value="Rare"', body)
+        self.assertIn('value="Basic"', body)
+        self.assertIn('value="Common"', body)
         self.assertIn('name="display"', body)
         self.assertIn('name="category"', body)
         for label in ("Add (Live)", "Disable", "Remove", "List Saved", "Run Update + Heartbeat", "Confirm Pending Listings", "Update Status"):
@@ -96,6 +98,33 @@ class RarityWatchPortalTests(unittest.TestCase):
             headers=headers,
         )
         return urllib.request.urlopen(request)
+
+    def test_list_saved_groups_watches_in_requested_rarity_order(self):
+        result = {
+            'count': 6, 'network_calls': 0, 'notifications': 0,
+            'watches': [
+                {'enabled':True,'rarity':'Basic','name':'Basic One','contract':'0x'+'6'*40},
+                {'enabled':True,'rarity':'Rare','name':'Rare One','contract':'0x'+'4'*40},
+                {'enabled':True,'rarity':'Exotic','name':'Exotic One','contract':'0x'+'1'*40},
+                {'enabled':False,'rarity':'Common','name':'Common One','contract':'0x'+'5'*40},
+                {'enabled':True,'rarity':'Epic','name':'Epic One','contract':'0x'+'3'*40},
+                {'enabled':True,'rarity':'Legendary','name':'Legendary One','contract':'0x'+'2'*40},
+            ],
+        }
+        text = self.portal._format_saved_watches(result)
+        headings = [text.index(f'[{rarity}]') for rarity in
+                    ('Exotic','Legendary','Epic','Rare','Common','Basic')]
+        self.assertEqual(headings, sorted(headings))
+        self.assertIn('[Common] 1 watch(es)\nOFF Common One', text)
+        self.assertIn('[Basic] 1 watch(es)\nON  Basic One', text)
+        self.assertTrue(text.startswith('6 saved watch(es)\n'))
+        self.assertTrue(text.endswith('network calls: 0\nnotifications: 0'))
+
+    def test_list_saved_shows_empty_rarity_groups(self):
+        text = self.portal._format_saved_watches({
+            'count': 0, 'watches': [], 'network_calls': 0, 'notifications': 0})
+        for rarity in ('Exotic','Legendary','Epic','Rare','Common','Basic'):
+            self.assertIn(f'[{rarity}] 0 watch(es)', text)
 
     def test_list_saved_maps_to_manager_without_state_write_or_live_effects(self):
         before = hashlib.sha256(self.state.read_bytes()).hexdigest()
@@ -263,13 +292,18 @@ class RarityWatchPortalTests(unittest.TestCase):
              {"action": "remove", "contract": contract, "rarity": "Legendary"}),
             ({"csrf": token, "action": "disable", "contract": contract, "rarity": "Rare"},
              {"action": "disable", "contract": contract, "rarity": "Rare"}),
+            ({"csrf": token, "action": "add", "contract": contract, "rarity": "Basic"},
+             {"action": "add", "contract": contract, "rarity": "Basic"}),
+            ({"csrf": token, "action": "add", "contract": contract, "rarity": "Common"},
+             {"action": "add", "contract": contract, "rarity": "Common"}),
         ]
         for values, expected in submissions:
             with self.post(values) as response:
                 self.assertEqual(response.status, 200)
             self.assertEqual(self.calls[-1][0], expected)
             self.assertEqual(self.calls[-1][1], {"state_path": self.state, "lock_path": self.root / "lock"})
-        self.assertEqual([call[0]["action"] for call in self.calls], ["add", "disable", "remove", "disable"])
+        self.assertEqual([call[0]["action"] for call in self.calls],
+                         ["add", "disable", "remove", "disable", "add", "add"])
 
     def test_manager_failure_is_visible_without_leaking_a_traceback(self):
         values = {"csrf": self.token(), "action": "add", "contract": "0x" + "a" * 40,

@@ -40,7 +40,7 @@ def validate_items(items,contracts):
         if mt.get('contract')!='POLYGON:'+contract or str(mt.get('tokenId'))!=token or not order.get('id'):raise ValueError('Best order identity mismatch')
         attrs=(item.get('meta') or {}).get('attributes') or []
         rarities=[a.get('value') for a in attrs if isinstance(a,dict) and str(a.get('key','')).strip().lower()=='rarity']
-        if len(rarities)!=1 or rarities[0] not in ('Common','Uncommon','Rare','Epic','Legendary','Exotic'):unknown.add(contract)
+        if len(rarities)!=1 or rarities[0] not in ('Basic','Common','Uncommon','Rare','Epic','Legendary','Exotic'):unknown.add(contract)
     return unknown
 
 def load_view(snapshot_path=None, *, now=None, required_contracts=None):

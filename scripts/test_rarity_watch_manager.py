@@ -17,11 +17,11 @@ def load_manager():
 
 
 class RarityWatchManagerTests(unittest.TestCase):
-    def test_epic_and_rare_are_supported_rarities_with_exact_filtered_urls(self):
+    def test_all_six_rarities_are_supported_with_exact_filtered_urls(self):
         manager = load_manager()
         contract = '0x' + 'f' * 40
-        self.assertEqual(manager.RARITIES, ('Exotic', 'Legendary', 'Epic', 'Rare'))
-        for rarity in ('Epic', 'Rare'):
+        self.assertEqual(manager.RARITIES, ('Exotic', 'Legendary', 'Epic', 'Rare', 'Basic', 'Common'))
+        for rarity in manager.RARITIES:
             self.assertEqual(manager._validate(contract, rarity), (contract, rarity))
             self.assertIn(f'traits%5BRarity%5D%5B0%5D={rarity}', manager._source_url(contract, rarity))
 

@@ -15,7 +15,7 @@ import re
 import tempfile
 
 HOME = Path(__file__).resolve().parents[1]
-RARITIES = {'Exotic', 'Legendary', 'Epic', 'Rare'}
+RARITIES = {'Exotic', 'Legendary', 'Epic', 'Rare', 'Basic', 'Common'}
 CONTRACT = re.compile(r'^0x[0-9a-f]{40}$')
 
 

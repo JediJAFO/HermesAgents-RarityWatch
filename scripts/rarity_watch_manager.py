@@ -23,7 +23,7 @@ CATALOG = HOME / "price-watches" / "mcfarlane-dc-sales.json"
 NODE = HOME / "node" / "node.exe"
 COLLECTOR = HOME / "price-watches" / "run_mcfarlane_exotic_deterministic.js"
 LOCK = HOME / "price-watches" / ".exotic-execution-lock"
-RARITIES = ("Exotic", "Legendary", "Epic", "Rare")
+RARITIES = ("Exotic", "Legendary", "Epic", "Rare", "Basic", "Common")
 CONTRACT_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
@@ -60,7 +60,7 @@ def _validate(contract: Any, rarity: Any) -> tuple[str, str]:
     if not isinstance(contract, str) or not CONTRACT_RE.fullmatch(contract):
         raise ValueError("Polygon contract must be 0x followed by exactly 40 hexadecimal characters")
     if rarity not in RARITIES:
-        raise ValueError("rarity must be exactly Exotic, Legendary, Epic, or Rare")
+        raise ValueError("rarity must be exactly Exotic, Legendary, Epic, Rare, Basic, or Common")
     return contract.lower(), rarity
 
 
