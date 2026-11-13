@@ -1,7 +1,7 @@
 /* Deterministic McFarlane Exotic collector: isolated Chrome only. */
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('__HERMES_HOME__/hermes-agent/node_modules/playwright');
+const { chromium } = require('__HERMES_HOME__/hermes-agent/apps/desktop/node_modules/@playwright/test');
 
 const ROOT = '__HERMES_HOME__/price-watches';
 const whatsappPolicy = require(path.join(ROOT, 'exotic_whatsapp_policy.js'));
@@ -736,7 +736,7 @@ function heartbeatReport(state, outcome = {}) {
   const aliases = heartbeatAliases(state.collections);
   const rate = Number(state.current_pol_usd?.rate);
   const validRate = Number.isFinite(rate) && rate > 0;
-  const lines = [outcome.saved_preview ? '**9AM ET Exotic listings — saved preview**' : '**9AM ET Exotic listings**'];
+  const lines = [outcome.saved_preview ? '**9AM ET Completion Watch Listings — saved preview**' : '**9AM ET Completion Watch Listings**'];
   if (outcome.complete === false) {
     lines.push('Partial check — saved last-known-good listings; not all listings reverified.');
     const unresolved = (outcome.failed_collections || []).map(x => aliases.get(x.name) || x.name.replace(/\s+/g,' '));

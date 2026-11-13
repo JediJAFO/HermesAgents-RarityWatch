@@ -14,7 +14,7 @@
     "price-watches/mtd_exotic_lowest_monitor.py": "46ccb1656ffac65128c7aec8f9cbd1b95ef233bbb04488777fa09f0a5ac1a428",
     "price-watches/mtd_legendary_lowest_monitor.py": "9a55a26707a6f34434211b971f44227454f2b09c3b6120406cbb33b07263b08e",
     "price-watches/rarity_watch_discord_delivery.py": "24a7aa999cb3e4dd997e458d2fd9542a177f5808fe1158e6399388cf740e4aa8",
-    "price-watches/run_mcfarlane_exotic_deterministic.js": "10154cf00800a2ad2f5cb7ba0dd0937e77d797d25b5d0da7fe47f20d3b01dfa4",
+    "price-watches/run_mcfarlane_exotic_deterministic.js": "3edd150cf2b584dc255f14ac65d2d0f3d89b58c8e4f13d483b6195c15210d7fe",
     "price-watches/test_rarity_collector.js": "da1ea01517204fb7df610729145a5b2016aaf0e2449cb1e9b28fc06914e4cdfa",
     "restore-config.json": "dc509d8422e6fc2b1888ff2e0393c40398b6cff4ddfca734d6a1630240620b90",
     "scripts/audit_mtd_wallet_aliases.py": "928ccfe09967886196c115e0357e849853210dfde6cc06f44c160265426e6971",
