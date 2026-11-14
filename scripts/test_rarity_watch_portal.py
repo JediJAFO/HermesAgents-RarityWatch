@@ -42,6 +42,7 @@ class RarityWatchPortalTests(unittest.TestCase):
         self.server = self.portal.make_server(
             state_path=self.state,
             lock_path=self.root / "lock",
+            csrf_path=self.root / "csrf",
             execute_fn=execute,
             port=0,
         )
@@ -60,8 +61,9 @@ class RarityWatchPortalTests(unittest.TestCase):
             body = response.read().decode()
             self.assertEqual(response.status, 200)
             self.assertIn("default-src 'none'", response.headers["Content-Security-Policy"])
-        self.assertIn("<title>RARITY WATCH MANAGER</title>", body)
-        self.assertIn("Exotic / Legendary Watch Manager", body)
+        self.assertIn("<title>MTD NFT COMPLETION WATCH MANAGER</title>", body)
+        self.assertIn("MTD NFT Completion Watch Manager", body)
+        self.assertNotIn("Exotic / Legendary Watch Manager", body)
         self.assertIn('name="contract"', body)
         self.assertIn('name="rarity"', body)
         self.assertIn('value="Exotic"', body)
@@ -215,12 +217,12 @@ class RarityWatchPortalTests(unittest.TestCase):
         spec.loader.exec_module(delivery)
         self.assertEqual(delivery.EXPECTED_CHANNEL_NAME, "mtd-completion-watch")
 
-    def test_manual_runner_uses_hermes_venv_with_delivery_dependencies(self):
-        expected = self.portal.HOME / "hermes-agent" / "venv" / "Scripts" / "python.exe"
+    def test_manual_runner_uses_owned_runtime_with_delivery_dependencies(self):
+        expected = self.portal.HOME / "services" / "mtd-runtime" / ".venv" / "Scripts" / "python.exe"
         self.assertEqual(self.portal.RUNNER_PYTHON, expected)
         self.assertTrue(self.portal.RUNNER_PYTHON.exists())
         completed = __import__("subprocess").run(
-            [str(self.portal.RUNNER_PYTHON), "-c", "import dotenv"],
+            [str(self.portal.RUNNER_PYTHON), "-I", "-B", "-c", "import dotenv, psutil; from zoneinfo import ZoneInfo; ZoneInfo('America/New_York')"],
             text=True, capture_output=True, timeout=20, check=False)
         self.assertEqual(completed.returncode, 0, completed.stderr)
 

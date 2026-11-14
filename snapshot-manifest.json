@@ -1,8 +1,8 @@
 {
   "kind": "exotic",
   "files": {
-    "McFarlane_Exotic_Watch_PRD.docx": "573b0ead235589d224959b8f8ecf12eae3228c9b09c672560ebb4a16810749b8",
-    "McFarlane_Exotic_Watch_PRD.md": "a1d8c188829f6a14ab4ae3d865f9d1e54e59ff13f64e56ff1305c7ca1cc95315",
+    "McFarlane_Exotic_Watch_PRD.docx": "513d34ddcabcf5da047e200f2fe3c565bc448d2431ea9759bf3b80fc1944e43e",
+    "McFarlane_Exotic_Watch_PRD.md": "286dfc307b5e77abb1d407ae28fe770e057def36f4b7acc0fae86aff72630d8f",
     "RESTORE.md": "0d85d15030655272a8073380e164c5287bc677d4b631f18101d2a937150155f2",
     "plugins/rarity-watch-manager/__init__.py": "84d77271ac0151955aca9b156c5ed9f1439fe813f63f6d76a66cf811c1f5402d",
     "plugins/rarity-watch-manager/dashboard/manifest.json": "c3df86f49873aab5bcd53d1e5773e7aa448cb0b4de1ace492f8054458abf2e21",
@@ -44,7 +44,7 @@
     "scripts/mtd_wallet_graph_ui.py": "e82771d6468d7e7ee1befe71e38a5477f1627bbb0b03ce9fff914a3e054ca708",
     "scripts/mtd_wallet_transfer_analyzer.py": "d1c39cf9b3a21122ce326a4c7e9dc7496df4c0965e385fc5f6692b94d1a61e39",
     "scripts/rarity_watch_manager.py": "5668d30b713acb65470efbc7bffc9b6f0a9329433f999ab07cc2c30953671a22",
-    "scripts/rarity_watch_portal.py": "43d5e0424acd024a3cb3b16c1f47d11268bb071f63de95eb9a61cd165dbbf4df",
+    "scripts/rarity_watch_portal.py": "d33b3d4b4ec0a9d0b57b32b8c8d9604bf7b8e86b66d130885927d3b0779ff9b2",
     "scripts/recover_isolated_monitor_chrome.py": "d7fb3a3b733049f5a0c357c3eea01f7aafc7e15ac9f0bd171b43dbc4a2ee8858",
     "scripts/refresh-mcfarlane-prds.py": "0ca2f6e7f603a59247b77f1c361725b8737a9099032bf1fc4f7ddb71528c8033",
     "scripts/refresh_exotic_current_pol_usd.py": "869c9b3af898874526213f46de486facc37892b99bf888d02dcdd3fa4e865832",
@@ -59,7 +59,7 @@
     "scripts/test_monitor_backup.py": "e136caaf0e5ea617f03dafed53a430496add4fe7164ecbea22d96f9e11ee9cb8",
     "scripts/test_rarity_watch_manager.py": "f9e9c9c36458a2ae046986e4fede550db1c2cd39264a0d38ae059985d074ebd9",
     "scripts/test_rarity_watch_plugin_api.py": "14edef7de8c2fb56afd2e89b2c75a8d8b5c19dae0dd766f781cf7fb006eddb73",
-    "scripts/test_rarity_watch_portal.py": "74d4d8bfd6c84802492ff7fb2db8fbe7ee81a87baa84715ac8302444499ab2a4",
+    "scripts/test_rarity_watch_portal.py": "560dce8959fab3e73a6e59b7bfc84c364d3587dce6d424cda43f3748e2ed9741",
     "scripts/test_report_mtd_wallet_alias_audit.py": "c75513a63419ac97afb380bc49d7d100f94236b3929307d824dbdca28d267bbc",
     "scripts/test_run_rarity_update_and_heartbeat.py": "6492240c9775cbb502cc13aa6229817356a78836f0336165a11c84f912bff8ca"
   }

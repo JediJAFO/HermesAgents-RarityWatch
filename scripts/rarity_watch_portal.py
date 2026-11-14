@@ -23,7 +23,7 @@ CSRF_SECRET = HOME / "cache" / "rarity-watch-portal-csrf.key"
 UPDATE_STATUS = HOME / "price-watches" / "rarity-manual-update-status.json"
 UPDATE_LAUNCH_LOCK = HOME / "price-watches" / ".rarity-manual-update.lock"
 UPDATE_RUNNER = HOME / "scripts" / "run_rarity_update_and_heartbeat.py"
-RUNNER_PYTHON = HOME / "hermes-agent" / "venv" / "Scripts" / "python.exe"
+RUNNER_PYTHON = HOME / "services" / "mtd-runtime" / ".venv" / "Scripts" / "python.exe"
 NODE = HOME / "node" / "node.exe"
 COLLECTOR = HOME / "price-watches" / "run_mcfarlane_exotic_deterministic.js"
 DISCORD_DELIVERY = HOME / "price-watches" / "rarity_watch_discord_delivery.py"
@@ -164,9 +164,9 @@ def make_server(*, state_path: Path = STATE, lock_path: Path = LOCK,
             return self.headers.get("Host") == f"127.0.0.1:{self.server.server_port}"
 
         def page(self, result: str = "Ready. List Saved reads disk only; no marketplace calls or notifications.", code: int = 200) -> None:
-            content = '''<!doctype html><html><head><meta charset="utf-8"><title>RARITY WATCH MANAGER</title><style>
+            content = '''<!doctype html><html><head><meta charset="utf-8"><title>MTD NFT COMPLETION WATCH MANAGER</title><style>
 body{font:16px system-ui;max-width:900px;margin:0;padding:25px;background:#111827;color:#eee}input,select,button{font:inherit;padding:10px;border-radius:6px;border:1px solid #4b5563;background:#1f2937;color:#eee}label{display:grid;gap:5px}.grid{display:grid;grid-template-columns:2fr 1fr;gap:12px}.actions{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:16px 0}button{cursor:pointer}pre{white-space:pre-wrap;padding:12px;background:#1f2937;border:1px solid #374151;border-radius:6px}small{color:#9ca3af}@media(max-width:700px){.grid,.actions{grid-template-columns:1fr}}
-</style></head><body><nav><a href="http://127.0.0.1:8765/" target="_top">← MTD Control Panel</a></nav><h1>Exotic / Legendary Watch Manager</h1><p>Zero LLM tokens. Add completes only after the baseline is verified; it enables subsequent interval/9AM heartbeat coverage and posts a read-back-verified availability result to Discord. If Discord is temporarily unavailable, the watch remains enabled and the result is shown as pending for an exact retry. Disable, Remove, List Saved, and Resend Heartbeat are saved-state only: no marketplace calls or monitor refresh.</p>
+</style></head><body><nav><a href="http://127.0.0.1:8765/" target="_top">← MTD Control Panel</a></nav><h1>MTD NFT Completion Watch Manager</h1><p>Zero LLM tokens. Add completes only after the baseline is verified; it enables subsequent interval/9AM heartbeat coverage and posts a read-back-verified availability result to Discord. If Discord is temporarily unavailable, the watch remains enabled and the result is shown as pending for an exact retry. Disable, Remove, List Saved, and Resend Heartbeat are saved-state only: no marketplace calls or monitor refresh.</p>
 <form method="post" action="/execute"><input type="hidden" name="csrf" value="{token}"><div class="grid">
 <label>Polygon contract<input name="contract" placeholder="0x + 40 hexadecimal characters"></label>
 <label>Rarity<select name="rarity"><option value="Exotic">Exotic</option><option value="Legendary">Legendary</option><option value="Epic">Epic</option><option value="Rare">Rare</option><option value="Basic">Basic</option><option value="Common">Common</option></select></label>
