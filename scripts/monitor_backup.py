@@ -98,10 +98,13 @@ def snapshot(kind, target, docs=DOCS):
     spec=manifest()[kind]
     for ext in ('md','docx'):
         src=docs/(spec['prd']+'.'+ext); dest=target/src.name
-        if ext=='md': scan(src.read_text(encoding='utf-8'))
+        if ext=='md':
+            text=src.read_text(encoding='utf-8'); scan(text)
+            # Canonicalize mixed Windows/POSIX document endings BEFORE hashing.
+            dest.write_text(text,encoding='utf-8',newline='\n')
         else:
-            scan_docx(src)
-        shutil.copy2(src,dest); names.append(dest.name)
+            scan_docx(src); shutil.copy2(src,dest)
+        names.append(dest.name)
     config={'kind':kind,'schedules':schedules(kind),'restore_ready':False,
             'private_inputs_required':['collection allowlist and exact filtered URLs','verified baseline/dedupe state or controlled no-alert rebaseline','delivery destinations','RARIBLE_API_KEY','optional private wallet aliases'],
             'python':['python-docx','psutil','tzdata'],'node':['playwright'],
@@ -195,11 +198,18 @@ def repository_gate(repo, git, names):
     if extras: raise RuntimeError('Legacy artifacts require explicit repository cleanup: '+', '.join(sorted(extras)))
     return sorted(deletions)
 
-# Frozen identities of the four legacy backup commits reviewed during repair.
-# Metadata is an additional check, never proof of backup ownership.
+# Frozen identities reviewed during repair; metadata alone is never ownership.
 REVIEWED_LEGACY_COMMITS = {
-    'sales': {'219b8242b4aeed49b4f7514897483116838d801c', '8873c7476e09643955130d004de1ab984b1c0cee'},
+    'sales': {'219b8242b4aeed49b4f7514897483116838d801c', '8873c7476e09643955130d004de1ab984b1c0cee',
+              '258f6742fa0f278041bfd10812c2524f2ff440df'},
     'exotic': {'616b0f6ea373b6afb98ab33f9d6388c99d580fac', '1eb02cb37e995cb5ecc403d9948df0552012610a'},
+}
+# Nov11's copied PRD mixed 111 CRLF with 56 LF. Git normalized its blob.
+# Exact commit/path/manifest digest AND actual blob digest; no generic mismatch waiver.
+REVIEWED_TEXT_DIGESTS = {
+    ('258f6742fa0f278041bfd10812c2524f2ff440df', 'McFarlane_DC_Sales_Alerts_PRD.md',
+     'db1b36d64d2f9f4c8287ef8124f3463aed8d9548933904b4a8cbb24889dc404a'):
+     '3b55b35294b1f00028ba77e56fe7e761d069a92e477156338cb4c78a7d117c95',
 }
 
 
@@ -234,7 +244,7 @@ def validate_backup_commit(kind, git, commit, names, deletions=()):
     inventory=json.loads(raw_inventory)
     if set(inventory)!={'kind','files'}:raise RuntimeError('Unreviewed snapshot metadata')
     files=inventory['files']
-    if inventory.get('kind')!=kind or not isinstance(files,dict) or set(files)-set(names):
+    if inventory.get('kind')!=kind or not isinstance(files,dict) or set(files)!=set(names)-{'snapshot-manifest.json'}:
         raise RuntimeError('Outstanding snapshot inventory is not approved')
     tree={}
     for line in git('ls-tree','-r',commit).splitlines():
@@ -244,6 +254,7 @@ def validate_backup_commit(kind, git, commit, names, deletions=()):
         tree[name]=metadata
     if set(tree)-{'.gitignore'} != set(files)|{'snapshot-manifest.json'}:
         raise RuntimeError('Outgoing Git tree differs from exact snapshot inventory')
+    if '.gitignore' in tree:scan(git('show',commit+':.gitignore'))
     for name,digest in files.items():
         if Path(name).is_absolute() or '..' in Path(name).parts or name not in names:
             raise RuntimeError('Unsafe outgoing snapshot path')
@@ -253,13 +264,21 @@ def validate_backup_commit(kind, git, commit, names, deletions=()):
             # Git may normalize Windows CRLF text blobs to LF on commit.
             lf=data.replace(bytes((13,10)),bytes((10,)))
             variants.update((lf,lf.replace(bytes((10,)),bytes((13,10)))))
-        if digest not in {hashlib.sha256(value).hexdigest() for value in variants}:
+        if digest not in {hashlib.sha256(value).hexdigest() for value in variants} \
+                and REVIEWED_TEXT_DIGESTS.get((commit,name,digest))!=hashlib.sha256(data).hexdigest():
             raise RuntimeError('Outgoing snapshot hash mismatch')
         if name.endswith('.docx'):
             scan_docx(data)
         elif Path(name).suffix in ('.py','.js','.json','.md','.yaml'):
             text=data.decode('utf-8'); scan(text)
             if name.endswith('.py'):ast.parse(text,filename=name)
+            if name=='restore-config.json':
+                config=json.loads(text)
+                if not isinstance(config,dict) or config.get('kind')!=kind or config.get('restore_ready') is not False \
+                        or not isinstance(config.get('schedules'),list) \
+                        or any(not isinstance(row,dict) or row.get('enabled') is not False
+                               or row.get('delivery')!='CONFIGURE_PRIVATELY' for row in config['schedules']):
+                    raise RuntimeError('Outgoing restore configuration is not disabled/private')
         else:
             raise RuntimeError('Unreviewed outgoing artifact type')
     return record[2]
@@ -288,6 +307,37 @@ def outstanding_backup_commits(kind, git, names, owned=(), deletions=()):
     return head,remote[0],commits
 
 
+def write_record(path, value):
+    """Atomic private ownership/intent record; an interrupted write never grants ownership."""
+    temporary=path.with_name(path.name+'.'+secrets.token_hex(8))
+    with temporary.open('x',encoding='utf-8') as handle:
+        json.dump(value,handle); handle.flush(); os.fsync(handle.fileno())
+    os.replace(temporary,path)
+
+
+def read_ownership(repo, kind, git):
+    ownership=repo/'.git/monitor-backup-owned-commits.json'
+    owned=json.loads(ownership.read_text(encoding='utf-8')) if ownership.exists() else []
+    if not isinstance(owned,list) or any(not isinstance(c,str) or not re.fullmatch(r'[0-9a-f]{40}',c) for c in owned):
+        raise RuntimeError('Invalid backup ownership record; review required')
+    intent=repo/'.git/monitor-backup-commit-intent.json'
+    if not intent.exists():return owned
+    record=json.loads(intent.read_text(encoding='utf-8'))
+    if not isinstance(record,dict) or set(record)!={'kind','parent','tree','day'} \
+            or record['kind']!=kind \
+            or any(not isinstance(record[n],str) or not re.fullmatch(r'[0-9a-f]{40}',record[n]) for n in ('parent','tree')) \
+            or not isinstance(record['day'],str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}',record['day']):
+        raise RuntimeError('Invalid backup commit intent; review required')
+    head=git('rev-parse','HEAD')
+    if head==record['parent']:return owned  # interrupted before commit; no new identity
+    actual=git('show','--format=%T%n%P%n%s','--no-patch',head).splitlines()
+    expected=[record['tree'],record['parent'],f"backup: {kind} source snapshot {record['day']}"]
+    if actual!=expected:raise RuntimeError('Backup commit intent does not match HEAD; review required')
+    # This grants only candidate ownership. Every outgoing historical tree still
+    # passes ancestry, exact inventory/hash, DOCX and privacy validation below.
+    return list(dict.fromkeys(owned+[head]))
+
+
 def backup_main(kind):
     parser=argparse.ArgumentParser()
     parser.add_argument('--snapshot',type=Path,help='Local source-only snapshot; no git/network')
@@ -312,13 +362,16 @@ def backup_main(kind):
             out=subprocess.run(['git',*a],cwd=repo,env=env,text=not binary,capture_output=True,check=True,timeout=120).stdout
             return out if binary else out.rstrip('\n')
         ownership=repo/'.git/monitor-backup-owned-commits.json'
-        owned=json.loads(ownership.read_text(encoding='utf-8')) if ownership.exists() else []
-        if not isinstance(owned,list) or any(not isinstance(c,str) or not re.fullmatch(r'[0-9a-f]{40}',c) for c in owned):
-            raise RuntimeError('Invalid backup ownership record; review required')
+        owned=read_ownership(repo,kind,git)
+        intent=repo/'.git/monitor-backup-commit-intent.json'
         with tempfile.TemporaryDirectory(prefix='monitor-snapshot-') as tmp:
             names=snapshot(kind,Path(tmp)); verify(Path(tmp))
             deletions=repository_gate(repo,git,names)
             head,remote,pending=outstanding_backup_commits(kind,git,names,owned,deletions)
+            if intent.exists() and head in pending and head in owned:
+                # Recovery reached the same complete historical validation as normal publication.
+                write_record(ownership,list(dict.fromkeys(owned+pending)))
+                intent.unlink()
             changed=[n for n in names if not (repo/n).exists() or (repo/n).read_bytes()!=(Path(tmp)/n).read_bytes()]
             if not changed and not deletions and not pending:
                 print('No sanitized monitor changes; local backup is already published.'); return
@@ -330,8 +383,14 @@ def backup_main(kind):
                 (repo/n).parent.mkdir(parents=True,exist_ok=True); shutil.copy2(Path(tmp)/n,repo/n)
             if changed or deletions:
                 git('add','-A','--',*(changed+deletions))
+                tree=git('write-tree')
+                if not re.fullmatch(r'[0-9a-f]{40}',tree):raise RuntimeError('Cannot establish backup commit tree')
+                # Durable before commit, so validation failure/termination cannot orphan its identity.
+                write_record(intent,{'kind':kind,'parent':head,'tree':tree,'day':today})
                 git('-c','user.name=Monitor backup','-c','user.email=monitor@users.noreply.github.com','commit','-m',f'backup: {kind} source snapshot {today}','--',*(changed+deletions))
                 created=git('rev-parse','HEAD')
+                if git('show','--format=%T','--no-patch',created)!=tree:
+                    raise RuntimeError('New backup commit differs from recorded intent tree')
                 if created==head or validate_backup_commit(kind,git,created,names,deletions)!=head:
                     raise RuntimeError('New backup commit has unexpected ancestry')
                 # The created object must match the exact freshly verified bytes.
@@ -342,9 +401,8 @@ def backup_main(kind):
                         expected=expected.replace(bytes((13,10)),bytes((10,)))
                     if actual!=expected:raise RuntimeError('New backup commit differs from verified snapshot')
                 pending.append(created);head=created
-                temporary=ownership.with_name(ownership.name+'.'+secrets.token_hex(8))
-                with temporary.open('x',encoding='utf-8') as handle:json.dump(pending,handle)
-                os.replace(temporary,ownership)
+                write_record(ownership,list(dict.fromkeys(owned+pending)))
+                intent.unlink()
             repository_gate(repo,git,names)
             if git('rev-parse','HEAD')!=head:raise RuntimeError('Backup HEAD changed before publication')
             # Re-evaluate the Eastern day at the actual attempt boundary.
