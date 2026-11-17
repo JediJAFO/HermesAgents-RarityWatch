@@ -172,10 +172,12 @@ class Store:
             raise
         return receipt
     def schedule_updates(self,now):
-        """Saved-only eligibility; one durable batch at a time, latest missed slot only.
+        """Saved-only eligibility; one healthy batch plus verified recovery jobs.
 
-        Claiming a slot is not completion: all its jobs must publish before the
-        completed watermark advances. Existing cursors/retries continue unchanged.
+        observed acknowledges exhausted queries, not valid supply. completed only
+        advances for fully published scope. Invalid members retain evidence in a
+        separate full-history recovery lane, with ordinary bounded incrementals
+        between monthly full recoveries. Neither lane fabricates valid supply.
         """
         from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
         try: zone=ZoneInfo('America/New_York')
@@ -195,26 +197,76 @@ class Store:
             # Every approved contract needs its initial query exhausted, not just
             # a page, a published first contract, or a misleading chain-complete flag.
             if db.execute("SELECT 1 FROM contracts c WHERE NOT EXISTS (SELECT 1 FROM jobs j WHERE j.contract=c.contract AND j.mode='backfill' AND j.state='exhausted') LIMIT 1").fetchone(): return
+            cadence.setdefault('observed',cadence['completed'])
+            cadence.setdefault('recoveries',[])
+            # Durable identities authorize this narrow lane, never mode alone.
+            # Retain exhausted entries too: a missing member/source fails closed.
+            if not isinstance(cadence['recoveries'],list): return 'blocked'
+            recovery_ids=set()
+            for member in cadence['recoveries']:
+                if not isinstance(member,dict) or set(member)!= {'job','source'}: return 'blocked'
+                identity=member['job']; source=member['source']
+                if type(identity) is not int or type(source) is not int or identity in recovery_ids: return 'blocked'
+                j=db.execute('SELECT * FROM jobs WHERE id=?',(identity,)).fetchone()
+                origin=db.execute('SELECT * FROM jobs WHERE id=?',(source,)).fetchone()
+                if (not j or not origin or source>=identity or j['contract']!=origin['contract'] or
+                    j['mode']!='recovery' or j['lower_at'] is not None or origin['state']!='exhausted' or
+                    origin['published'] is not None or origin['error']!='Invalid per-token balance: supply withheld; provider coverage incomplete'):
+                    return 'blocked'
+                if j['state'] not in ('queued','running','deferred','exhausted'): return 'blocked'
+                if j['state']=='exhausted' and j['published'] is None and j['error']!='Invalid per-token balance: supply withheld; provider coverage incomplete': return 'blocked'
+                recovery_ids.add(identity)
+            if {j[0] for j in db.execute("SELECT id FROM jobs WHERE mode='recovery'")}!=recovery_ids: return 'blocked'
             pending=cadence['pending']
             if pending:
-                for identity in pending['jobs']:
-                    job=db.execute('SELECT state,published FROM jobs WHERE id=?',(identity,)).fetchone()
-                    if not job or job['state']!='exhausted' or job['published'] is None: return
-                cadence['completed']=pending['slot'];cadence['pending']=None
+                if not pending['jobs'] or len(set(pending['jobs']))!=len(pending['jobs']) or recovery_ids.intersection(pending['jobs']): return 'blocked'
+                members=[db.execute('SELECT * FROM jobs WHERE id=?',(identity,)).fetchone() for identity in pending['jobs']]
+                if any(j is None for j in members): return 'blocked'
+                for job in members:
+                    if job['state'] not in ('queued','running','deferred','exhausted'): return 'blocked'
+                    # Validate every member before allowing any nonterminal return:
+                    # list order must not hide a blocked or unknown terminal result.
+                    if job['state']=='exhausted' and job['published'] is None and job['error']!='Invalid per-token balance: supply withheld; provider coverage incomplete': return 'blocked'
+                if any(job['state']!='exhausted' for job in members): return
+                cadence['observed']=pending['slot']
+                cadence['observed_excluded_contracts']=sorted(set(pending.get('excluded_contracts',[])+[j['contract'] for j in members if j['published'] is None]))
+                unresolved=db.execute("SELECT 1 FROM jobs j WHERE j.id=(SELECT MAX(x.id) FROM jobs x WHERE x.contract=j.contract) AND j.published IS NULL LIMIT 1").fetchone()
+                if not unresolved and not pending.get('excluded_contracts'): cadence['completed']=pending['slot']
+                cadence['pending']=None
                 persist()
-            if slot<=cadence['activated'] or (cadence['completed'] is not None and slot<=cadence['completed']): return
+            if slot<=cadence['activated'] or (cadence['observed'] is not None and slot<=cadence['observed']): return
             # Preserve any pre-policy in-flight/blocked job; never reset its guards.
-            if db.execute("SELECT 1 FROM jobs WHERE state IN ('queued','running','deferred','blocked') LIMIT 1").fetchone(): return
+            active=db.execute("SELECT id FROM jobs WHERE state IN ('queued','running','deferred','blocked')").fetchall()
+            if any(j['id'] not in recovery_ids for j in active): return
             rows=db.execute("SELECT c.contract,MAX(j.id) latest FROM contracts c JOIN jobs j USING(contract) GROUP BY c.contract").fetchall()
             if not rows: return
-            identities=[]
+            identities=[]; excluded=[]
             for row in rows:
                 j=db.execute('SELECT * FROM jobs WHERE id=?',(row['latest'],)).fetchone()
-                last_full=db.execute("SELECT MAX(upper_at) FROM jobs WHERE contract=? AND mode IN ('backfill','reconcile') AND state='exhausted'",(j['contract'],)).fetchone()[0]
+                if j['id'] in recovery_ids and j['state']!='exhausted':
+                    excluded.append(j['contract']);continue
+                last_full=db.execute("SELECT MAX(upper_at) FROM jobs WHERE contract=? AND mode IN ('backfill','reconcile','recovery') AND state='exhausted'",(j['contract'],)).fetchone()[0]
                 full=not last_full or slot-datetime.fromisoformat(stamp(last_full)).timestamp()>=30*86400
+                invalid=j['state']=='exhausted' and j['published'] is None and j['error']=='Invalid per-token balance: supply withheld; provider coverage incomplete'
+                if invalid:
+                    recovery=db.execute("SELECT MAX(upper_at) FROM jobs WHERE contract=? AND mode IN ('reconcile','recovery') AND state='exhausted'",(j['contract'],)).fetchone()[0]
+                    # Keep observing recent evidence during the full-history cooldown.
+                    # Ordinary incremental membership drains withheld, never published;
+                    # only full recovery gets the registered independent-lane exemption.
+                    full=not recovery or slot-datetime.fromisoformat(stamp(recovery)).timestamp()>=30*86400
+                recovering=invalid and full
+                if recovering: excluded.append(j['contract'])
                 lower=None if full else utc(datetime.fromisoformat(stamp(j['upper_at'])).timestamp()-7*86400)
-                identities.append(db.execute('INSERT INTO jobs(contract,mode,lower_at,upper_at) VALUES(?,?,?,?)',(j['contract'],'reconcile' if full else 'incremental',lower,utc(slot))).lastrowid)
-            cadence['pending']={'slot':slot,'jobs':identities}
+                # New recurring work joins at enqueue age, not artificial age zero.
+                # Preserve least-serviced fairness across batch rollovers; initial
+                # historical jobs and every existing checkpoint remain untouched.
+                identity=db.execute('INSERT INTO jobs(contract,mode,lower_at,upper_at,serviced) VALUES(?,?,?,?,?)',(j['contract'],'recovery' if recovering else ('reconcile' if full else 'incremental'),lower,utc(slot),now)).lastrowid
+                if recovering: cadence['recoveries'].append({'job':identity,'source':j['id']})
+                else: identities.append(identity)
+            if identities: cadence['pending']={'slot':slot,'jobs':identities,'excluded_contracts':excluded}
+            else:
+                cadence['observed']=slot
+                cadence['observed_excluded_contracts']=excluded
             persist()
     def save_metadata(self,asset,rarity,source,raw,now=None):
         parts=asset.split(':')
@@ -238,7 +290,21 @@ class Store:
                 if g and db.execute("SELECT 1 FROM sqlite_master WHERE name='rarity_publications'").fetchone():
                     publication=db.execute('SELECT result FROM rarity_publications WHERE generation=? ORDER BY id DESC LIMIT 1',(g['id'],)).fetchone()
                     if publication: result=json.loads(publication[0])
-                contracts.append({**{k:c[k] for k in ('contract','name','standard')},**result,'progress':progress,'coverage':QUALIFIER if g else 'partial / unknown; blockchain incomplete','state':j['state'],'pages':j['pages'],'error':j['error'],'next_retry':utc(j['due']) if j['due'] else None,'mode':j['mode'],'as_of':g['created_at'] if g else None,'upper_at':j['upper_at']})
+                freshness=dict(db.execute("SELECT MAX(r.retrieved_at) last_attempted_at,MAX(CASE WHEN r.accepted=1 THEN r.retrieved_at END) last_accepted_at FROM receipts r JOIN jobs x ON x.id=r.job WHERE x.contract=?",(c['contract'],)).fetchone())
+                # serviced also seeds recurring queue age. A queued job is not
+                # an attempted request unless durable request intent exists.
+                intent=db.execute("SELECT value FROM runtime WHERE name='pending_request'").fetchone()
+                try: pending_job=json.loads(intent[0]).get('job') if intent else None
+                except (ValueError,TypeError,AttributeError): pending_job=None
+                attempted=utc(j['serviced']) if j['serviced'] and (j['state']!='queued' or pending_job==j['id']) else None
+                freshness['last_attempted_at']=max(filter(None,(freshness['last_attempted_at'],attempted)),default=None)
+                freshness['query_exhausted_through']=db.execute("SELECT MAX(upper_at) FROM jobs WHERE contract=? AND state='exhausted'",(c['contract'],)).fetchone()[0]
+                freshness['published_through']=db.execute('SELECT upper_at FROM jobs WHERE id=?',(g['job'],)).fetchone()[0] if g else None
+                invalid=not progress['balance_valid']
+                last_invalid=db.execute("SELECT id,error FROM jobs WHERE contract=? AND state='exhausted' AND published IS NULL AND error=? ORDER BY id DESC LIMIT 1",(c['contract'],'Invalid per-token balance: supply withheld; provider coverage incomplete')).fetchone() if invalid else None
+                recovery=db.execute("SELECT MAX(upper_at) FROM jobs WHERE contract=? AND mode IN ('reconcile','recovery') AND state='exhausted'",(c['contract'],)).fetchone()[0] if invalid else None
+                validation={'validation_state':'withheld' if invalid else ('published' if g and j['published'] else 'pending'),'validation_error':last_invalid['error'] if last_invalid else None,'unresolved_job':last_invalid['id'] if last_invalid else None,'recovery_not_before':utc(datetime.fromisoformat(stamp(recovery)).timestamp()+30*86400) if recovery else None,'source_freshness':freshness}
+                contracts.append({**validation,**{k:c[k] for k in ('contract','name','standard')},**result,'progress':progress,'coverage':QUALIFIER if g else 'partial / unknown; blockchain incomplete','state':j['state'],'pages':j['pages'],'error':j['error'],'next_retry':utc(j['due']) if j['due'] else None,'mode':j['mode'],'as_of':g['created_at'] if g else None,'upper_at':j['upper_at']})
             rarity_metadata=None
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='rarity_work'").fetchone():
                 from mtd_rarity_queue import progress as metadata_progress
