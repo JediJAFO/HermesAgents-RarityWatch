@@ -211,6 +211,8 @@ class RaribleAdapter:
         if endpoint=='orders' and not valid_order_id(request.get('order_id')): raise ValueError('Malformed Polygon order identifier; no request made')
         key=self.key or api_key(self.root)
         lease=self.root/'holder-activity-state.lock'; token=secrets.token_hex(16)
+        self.supply_outcome=None
+        released=False; http_status=None
         phase='not_started'; payload=None; error=None; failure=None
         plan={'version':1,'token':token,'identity':[0,0],'finished_epoch':None,'pacing_pending':False,'temp_name':None,'manual':False}
         owned=False; initialized=False
@@ -240,6 +242,7 @@ class RaribleAdapter:
             phase='entered'
             try:
                 with (self.opener or urllib.request.urlopen)(req,timeout=remaining) as response:
+                    http_status=getattr(response,'status',None)
                     payload=json.loads(response.read().decode('utf-8'))
                 if not isinstance(payload,dict): raise ValueError('Malformed response')
                 phase='response_received'
@@ -267,7 +270,7 @@ class RaribleAdapter:
         except Exception as exc: error=exc
         finally:
             if owned and initialized and not plan['pacing_pending'] and not (failure is not None and failure.resource=='pacing' and failure.operation=='read'):
-                try: self._release(plan)
+                try: released=self._release(plan)
                 except (_LocalFailure,ValueError) as exc:
                     if failure is None: failure=exc if isinstance(exc,_LocalFailure) else _LocalFailure('release','holder_lease',exc)
             elif owned and not initialized: plan['manual']=True
@@ -279,5 +282,9 @@ class RaribleAdapter:
                 raise RuntimeError('Unknown provider outcome; manual review required')
             raise ProviderOutcome(payload=payload,error=error,repair=plan,diagnostic=diagnostic) from None
         if error is not None: raise error
+        if released is True and phase=='response_received' and type(http_status) is int and 200<=http_status<300:
+            # Local-only attestation. No credential/URL/message enters this seam.
+            import hashlib
+            self.supply_outcome={'endpoint':endpoint,'request_hash':hashlib.sha256(json.dumps(request,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest(),'class':'closed-success','lease_released':True,'pacing_saved':True}
         return payload
 

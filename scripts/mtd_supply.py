@@ -87,6 +87,74 @@ class Store:
                 db.execute('INSERT OR IGNORE INTO contracts VALUES(?,?,?,?)',row)
                 if not db.execute('SELECT 1 FROM jobs WHERE contract=?',(row[0],)).fetchone():
                     db.execute('INSERT INTO jobs(contract,mode,upper_at) VALUES(?,?,?)',(row[0],'backfill',utc(now)))
+    def quarantine_request(self,job,pending_hash,*,manual_hash=None,stage,exception_code,proof,db=None):
+        """Internal acknowledgement; caller MUST own worker mutex and protected provider boundary.
+
+        No timeout/age authorizes this operation. The manual CLI provides the
+        protected boundary; the worker permits only trusted returned payloads.
+        Runtime namespace avoids a destructive schema migration on existing DBs.
+        """
+        if stage not in ('historical_unknown','page_validation') or exception_code not in ('unknown','ValueError'):
+            raise ValueError('Unsupported incident classification')
+        if proof not in ('operator_protected','adapter_closed_success'): raise ValueError('Protected outcome proof required')
+        if (stage=='historical_unknown') != (proof=='operator_protected'): raise ValueError('Inconsistent proof')
+        if db is None:
+            with self.connect() as conn:
+                conn.execute('BEGIN IMMEDIATE')
+                return self.quarantine_request(job,pending_hash,manual_hash=manual_hash,stage=stage,exception_code=exception_code,proof=proof,db=conn)
+        live=db.execute('SELECT * FROM jobs WHERE id=?',(job['id'],)).fetchone()
+        snapshot={k:v for k,v in job.items() if k!='standard'}
+        if not live or dict(live)!=snapshot or live['state'] not in ('blocked','queued','running','deferred') or live['published'] is not None:
+            raise ValueError('Job fence changed')
+        if collection(live['contract'])!=live['contract'] or live['mode'] not in ('backfill','incremental','reconcile'):
+            raise ValueError('Unsupported read-only job')
+        if not db.execute('SELECT 1 FROM contracts WHERE contract=?',(live['contract'],)).fetchone(): raise ValueError('Out of scope')
+        runtime=dict(db.execute('SELECT name,value FROM runtime'))
+        if any(k in runtime for k in ('auth_blocked','not_before','shared_gate')): raise ValueError('Provider-wide restriction retained')
+        pending=json.loads(runtime.get('pending_request','null'))
+        if not isinstance(pending,dict) or set(pending)!={'job','token','started'} or pending['job']!=live['id'] or not isinstance(pending['token'],str) or not re.fullmatch('[a-f0-9]{32}',pending['token']) or digest(pending)!=pending_hash:
+            raise ValueError('Pending fence changed')
+        stamp(pending['started'])
+        if manual_hash is None:
+            if 'manual_block' in runtime: raise ValueError('Preexisting manual restriction')
+        elif runtime.get('manual_block')!='1' or digest(runtime['manual_block'])!=manual_hash or stage!='historical_unknown':
+            raise ValueError('Manual fence changed')
+        if stage=='page_validation':
+            receipt=db.execute('SELECT * FROM receipts WHERE job=? ORDER BY id DESC LIMIT 1',(live['id'],)).fetchone()
+            if not receipt or receipt['accepted'] or not receipt['error'] or receipt['request']!=encode(self.request(snapshot)):
+                raise ValueError('Rejected raw evidence required')
+        body={'version':1,'status':'unresolved/operator-review','job':snapshot,'request':self.request(snapshot),'operation':'activities/search:MINT,BURN:read-only','intent':pending,'pending_hash':pending_hash,'stage':stage,'exception_code':exception_code,'proof':proof,'manual_hash':manual_hash}
+        identity=digest(body)
+        # Immutable append-only incident evidence, including across restarts.
+        db.execute("CREATE TRIGGER IF NOT EXISTS supply_incident_no_update BEFORE UPDATE ON runtime WHEN OLD.name LIKE 'supply_incident:%' BEGIN SELECT RAISE(ABORT,'Immutable supply incident'); END")
+        db.execute("CREATE TRIGGER IF NOT EXISTS supply_incident_no_delete BEFORE DELETE ON runtime WHEN OLD.name LIKE 'supply_incident:%' BEGIN SELECT RAISE(ABORT,'Immutable supply incident'); END")
+        db.execute("CREATE TRIGGER IF NOT EXISTS supply_incident_no_replace BEFORE INSERT ON runtime WHEN NEW.name LIKE 'supply_incident:%' AND EXISTS(SELECT 1 FROM runtime WHERE name=NEW.name) BEGIN SELECT RAISE(ABORT,'Immutable supply incident'); END")
+        db.execute('INSERT INTO runtime VALUES(?,?)',('supply_incident:'+identity,encode(body)))
+        db.execute("UPDATE jobs SET state='quarantined',error='Unresolved collection incident; last good retained' WHERE id=?",(live['id'],))
+        db.execute("DELETE FROM runtime WHERE name='pending_request' AND value=?",(runtime['pending_request'],))
+        if manual_hash is not None: db.execute("DELETE FROM runtime WHERE name='manual_block' AND value='1'")
+        return identity
+    def quarantine_registry(self,db):
+        """Validate exact immutable job/source identity; corruption fails closed."""
+        found={}
+        try:
+            for row in db.execute("SELECT name,value FROM runtime WHERE name LIKE 'supply_incident:%'"):
+                b=json.loads(row['value']);identity=row['name'].split(':',1)[1]
+                if not isinstance(b,dict) or set(b)!={'version','status','job','request','operation','intent','pending_hash','stage','exception_code','proof','manual_hash'} or b['version']!=1: return None
+                if (b['stage'],b['exception_code'],b['proof']) not in (('historical_unknown','unknown','operator_protected'),('page_validation','ValueError','adapter_closed_success')): return None
+                if (b['stage']=='historical_unknown' and b['manual_hash'] not in (None,digest('1'))) or (b['stage']=='page_validation' and b['manual_hash'] is not None): return None
+                if not isinstance(b['intent'],dict) or set(b['intent'])!={'job','token','started'} or not isinstance(b['intent']['token'],str) or not re.fullmatch('[a-f0-9]{32}',b['intent']['token']): return None
+                stamp(b['intent']['started'])
+                if digest(b)!=identity or b['status']!='unresolved/operator-review' or b['operation']!='activities/search:MINT,BURN:read-only': return None
+                j=b['job'];live=db.execute('SELECT * FROM jobs WHERE id=?',(j['id'],)).fetchone()
+                if not live or j['id'] in found or b['request']!=self.request(j) or b['intent']['job']!=j['id'] or digest(b['intent'])!=b['pending_hash']: return None
+                expected={**j,'state':'quarantined','error':'Unresolved collection incident; last good retained'}
+                if dict(live)!=expected or collection(j['contract'])!=j['contract'] or not db.execute('SELECT 1 FROM contracts WHERE contract=?',(j['contract'],)).fetchone(): return None
+                if j['mode'] not in ('backfill','incremental','reconcile') or b['proof'] not in ('operator_protected','adapter_closed_success'): return None
+                found[j['id']]=b
+            if {x[0] for x in db.execute("SELECT id FROM jobs WHERE state='quarantined'")}!=set(found): return None
+        except (KeyError,ValueError,TypeError,AttributeError): return None
+        return found
     def next_job(self,now):
         with self.connect(readonly=True) as db:
             r=db.execute("SELECT j.*,c.standard FROM jobs j JOIN contracts c USING(contract) WHERE state IN ('queued','running','deferred') AND due<=? ORDER BY serviced,id LIMIT 1",(now,)).fetchone()
@@ -119,58 +187,103 @@ class Store:
         with self.connect() as db:
             receipt=db.execute('INSERT INTO receipts(job,request,response,sha256,retrieved_at) VALUES(?,?,?,?,?)',(job['id'],encode(self.request(job)),encode(response),digest(response),utc(now))).lastrowid
         try:
-            if not isinstance(response,dict) or not isinstance(response.get('activities'),list): raise ValueError('Malformed page')
-            cursor=response.get('cursor')
-            if cursor is not None and (not isinstance(cursor,str) or not cursor or cursor==job['cursor'] or len(cursor)>8192): raise ValueError('Invalid/repeated cursor')
-            normalized=[(raw,normalize(raw,job['contract'],job['standard'])) for raw in response['activities']]
             with self.connect() as db:
                 db.execute('BEGIN IMMEDIATE')
-                live=db.execute('SELECT * FROM jobs WHERE id=?',(job['id'],)).fetchone()
-                if live['cursor']!=job['cursor'] or live['state'] not in ('queued','running','deferred'): raise ValueError('Stale page checkpoint')
-                for raw,n in normalized:
-                    if not (stamp(job['upper_at'])>=n['date'] and (not job['lower_at'] or n['date']>=stamp(job['lower_at']))): raise ValueError('Activity outside frozen range')
-                    h=digest(raw)
-                    db.execute('INSERT OR IGNORE INTO revisions VALUES(?,?,?)',(n['id'],h,encode(raw)))
-                    db.execute('INSERT OR IGNORE INTO observations VALUES(?,?,?)',(receipt,n['id'],h))
-                    order=(n['updated'],n['version'])
-                    prior=db.execute('SELECT e.* FROM events e JOIN event_aliases a ON a.event=e.event WHERE a.provider_id=?',(n['id'],)).fetchone()
-                    if prior and prior['event']!=n['event']:
-                        priororder=(prior['updated'],prior['version'])
-                        if order<priororder: continue
-                        if order==priororder: raise ValueError('Same-version log identity conflict')
-                        # Move every known duplicate representation with the revised
-                        # provider identity; stale alias rows cannot resurrect it.
-                        db.execute('UPDATE event_aliases SET event=? WHERE event=?',(n['event'],prior['event']))
-                        db.execute('DELETE FROM events WHERE event=?',(prior['event'],))
-                    old=db.execute('SELECT * FROM events WHERE event=?',(n['event'],)).fetchone()
-                    if old:
-                        oldorder=(old['updated'],old['version'])
-                        if order<oldorder:
-                            # Even stale duplicate representations establish an
-                            # alias: later log-identity revisions must move the
-                            # existing contribution, never append a second one.
-                            db.execute('INSERT OR REPLACE INTO event_aliases VALUES(?,?)',(n['id'],n['event']))
-                            continue
-                        # Duplicate provider representation is okay only when it
-                        # agrees on the supply contribution at the same version.
-                        if order==oldorder and any(str(n[k])!=str(old[k]) for k in ('quantity','reverted','date')): raise ValueError('Conflicting event revision')
-                    db.execute('INSERT OR REPLACE INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?)',(n['event'],job['contract'],n['asset'],n['id'],h,n['kind'],n['quantity'],n['date'],n['updated'],n['version'],n['reverted']))
-                    db.execute('INSERT OR REPLACE INTO event_aliases VALUES(?,?)',(n['id'],n['event']))
-                db.execute('UPDATE receipts SET accepted=1 WHERE id=?',(receipt,))
-                db.execute('UPDATE jobs SET cursor=?,state=?,pages=pages+1,serviced=?,failures=0,error=NULL WHERE id=?',(cursor,'running' if cursor else 'exhausted',now,job['id']))
-                if cursor is None:
-                    result=self.totals(db,job['contract'])
-                    if result['balance_valid']:
-                        g=db.execute('INSERT INTO generations(job,contract,result,created_at) VALUES(?,?,?,?)',(job['id'],job['contract'],encode(result),utc(now))).lastrowid
-                        from mtd_rarity_queue import capture_basis
-                        capture_basis(db,g,job['contract'])
-                        db.execute('UPDATE jobs SET published=? WHERE id=?',(g,job['id']))
-                    else: db.execute('UPDATE jobs SET error=? WHERE id=?',('Invalid per-token balance: supply withheld; provider coverage incomplete',job['id']))
-                db.execute("DELETE FROM runtime WHERE name='pending_request'")
+                self._apply_page(db,job,response,receipt,now)
         except Exception:
             with self.connect() as db: db.execute('UPDATE receipts SET error=? WHERE id=?',('Rejected page; inspect private evidence',receipt))
             raise
         return receipt
+    def _apply_page(self,db,job,response,receipt,now):
+        if not isinstance(response,dict) or not isinstance(response.get('activities'),list): raise ValueError('Malformed page')
+        cursor=response.get('cursor')
+        if cursor is not None and (not isinstance(cursor,str) or not cursor or cursor==job['cursor'] or len(cursor)>8192): raise ValueError('Invalid/repeated cursor')
+        normalized=[(raw,normalize(raw,job['contract'],job['standard'])) for raw in response['activities']]
+        live=db.execute('SELECT * FROM jobs WHERE id=?',(job['id'],)).fetchone()
+        if live['cursor']!=job['cursor'] or live['state'] not in ('queued','running','deferred'): raise ValueError('Stale page checkpoint')
+        for raw,n in normalized:
+            if not (stamp(job['upper_at'])>=n['date'] and (not job['lower_at'] or n['date']>=stamp(job['lower_at']))): raise ValueError('Activity outside frozen range')
+            h=digest(raw)
+            db.execute('INSERT OR IGNORE INTO revisions VALUES(?,?,?)',(n['id'],h,encode(raw)))
+            db.execute('INSERT OR IGNORE INTO observations VALUES(?,?,?)',(receipt,n['id'],h))
+            order=(n['updated'],n['version'])
+            prior=db.execute('SELECT e.* FROM events e JOIN event_aliases a ON a.event=e.event WHERE a.provider_id=?',(n['id'],)).fetchone()
+            if prior and prior['event']!=n['event']:
+                priororder=(prior['updated'],prior['version'])
+                if order<priororder: continue
+                if order==priororder: raise ValueError('Same-version log identity conflict')
+                # Move every known duplicate representation with the revised
+                # provider identity; stale alias rows cannot resurrect it.
+                db.execute('UPDATE event_aliases SET event=? WHERE event=?',(n['event'],prior['event']))
+                db.execute('DELETE FROM events WHERE event=?',(prior['event'],))
+            old=db.execute('SELECT * FROM events WHERE event=?',(n['event'],)).fetchone()
+            if old:
+                oldorder=(old['updated'],old['version'])
+                if order<oldorder:
+                    # Even stale duplicate representations establish an
+                    # alias: later log-identity revisions must move the
+                    # existing contribution, never append a second one.
+                    db.execute('INSERT OR REPLACE INTO event_aliases VALUES(?,?)',(n['id'],n['event']))
+                    continue
+                # Duplicate provider representation is okay only when it
+                # agrees on the supply contribution at the same version.
+                if order==oldorder and any(str(n[k])!=str(old[k]) for k in ('quantity','reverted','date')): raise ValueError('Conflicting event revision')
+            db.execute('INSERT OR REPLACE INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?)',(n['event'],job['contract'],n['asset'],n['id'],h,n['kind'],n['quantity'],n['date'],n['updated'],n['version'],n['reverted']))
+            db.execute('INSERT OR REPLACE INTO event_aliases VALUES(?,?)',(n['id'],n['event']))
+        db.execute('UPDATE receipts SET accepted=1 WHERE id=?',(receipt,))
+        db.execute('UPDATE jobs SET cursor=?,state=?,pages=pages+1,serviced=?,failures=0,error=NULL WHERE id=?',(cursor,'running' if cursor else 'exhausted',now,job['id']))
+        if cursor is None:
+            result=self.totals(db,job['contract'])
+            if result['balance_valid']:
+                g=db.execute('INSERT INTO generations(job,contract,result,created_at) VALUES(?,?,?,?)',(job['id'],job['contract'],encode(result),utc(now))).lastrowid
+                from mtd_rarity_queue import capture_basis
+                capture_basis(db,g,job['contract'])
+                db.execute('UPDATE jobs SET published=? WHERE id=?',(g,job['id']))
+            else: db.execute('UPDATE jobs SET error=? WHERE id=?',('Invalid per-token balance: supply withheld; provider coverage incomplete',job['id']))
+        db.execute("DELETE FROM runtime WHERE name='pending_request'")
+
+    def replay_cached_page(self,receipt_id,receipt_hash,pending_hash,job_hash,manual_hash,*,now=None,db=None):
+        """Internal cached-only apply; operator caller must own protected provider boundary.
+
+        No transport, no new receipt, no retry/cause inference. Fences and application
+        share one IMMEDIATE transaction; all original failure evidence is immutable.
+        """
+        now=time.time() if now is None else now
+        if db is None:
+            with self.connect() as conn:
+                conn.execute('BEGIN IMMEDIATE')
+                return self.replay_cached_page(receipt_id,receipt_hash,pending_hash,job_hash,manual_hash,now=now,db=conn)
+        runtime=dict(db.execute('SELECT name,value FROM runtime'))
+        if any(k in runtime for k in ('auth_blocked','not_before','shared_gate')): raise ValueError('Provider-wide restrictions retained')
+        intent=json.loads(runtime.get('pending_request','null'))
+        if not isinstance(intent,dict) or set(intent)!={'job','token','started'} or not isinstance(intent['token'],str) or not re.fullmatch('[a-f0-9]{32}',intent['token']) or digest(intent)!=pending_hash: raise ValueError('Pending intent fence changed')
+        stamp(intent['started'])
+        manual=runtime.get('manual_block')
+        if not isinstance(manual,str) or digest(manual)!=manual_hash: raise ValueError('Manual fence changed')
+        diagnostic=json.loads(manual)
+        if not isinstance(diagnostic,dict) or diagnostic.get('classification')!='global-required-review' or diagnostic.get('stage')!='page_commit' or diagnostic.get('exception_code')!='OperationalError': raise ValueError('Not a reviewed local SQL commit failure')
+        if set(diagnostic)-{'classification','stage','exception_code','sqlite_errorcode','sqlite_errorname'}: raise ValueError('Unrecognized manual restriction')
+        j=db.execute('SELECT * FROM jobs WHERE id=?',(intent['job'],)).fetchone()
+        if not j or digest(dict(j))!=job_hash or j['state']!='blocked' or j['published'] is not None or j['mode'] not in ('backfill','incremental','reconcile'): raise ValueError('Job fence changed')
+        job=dict(j)
+        contract=db.execute('SELECT standard FROM contracts WHERE contract=?',(job['contract'],)).fetchone()
+        if not contract or collection(job['contract'])!=job['contract']: raise ValueError('Scope changed')
+        job['standard']=contract['standard']
+        r=db.execute('SELECT * FROM receipts WHERE id=?',(receipt_id,)).fetchone()
+        if not r or digest(dict(r))!=receipt_hash or r['job']!=job['id'] or r['accepted']!=0 or r['error']!='Rejected page; inspect private evidence' or r['request']!=encode(self.request(job)): raise ValueError('Cached receipt fence changed')
+        response=json.loads(r['response'])
+        if digest(response)!=r['sha256']: raise ValueError('Cached payload hash changed')
+        body={'version':1,'operation':'cached-local-apply:no-HTTP','intent':intent,'pending_hash':pending_hash,'job_before':dict(j),'receipt_before':dict(r),'manual_before':manual,'at':utc(now)}
+        identity=digest(body)
+        for suffix,action,condition in (('update','UPDATE',"OLD.name LIKE 'supply_cached_replay:%'"),('delete','DELETE',"OLD.name LIKE 'supply_cached_replay:%'"),('replace','INSERT',"NEW.name LIKE 'supply_cached_replay:%' AND EXISTS(SELECT 1 FROM runtime WHERE name=NEW.name)")):
+            db.execute("CREATE TRIGGER IF NOT EXISTS supply_cached_no_"+suffix+" BEFORE "+action+" ON runtime WHEN "+condition+" BEGIN SELECT RAISE(ABORT,'Immutable cached replay evidence'); END")
+        db.execute('INSERT INTO runtime VALUES(?,?)',('supply_cached_replay:'+identity,encode(body)))
+        db.execute("UPDATE jobs SET state='queued' WHERE id=?",(job['id'],))
+        job['state']='queued'
+        self._apply_page(db,job,response,receipt_id,now)
+        db.execute('UPDATE receipts SET error=NULL WHERE id=?',(receipt_id,))
+        if db.execute("DELETE FROM runtime WHERE name='manual_block' AND value=?",(manual,)).rowcount!=1: raise ValueError('Manual acknowledgement changed')
+        return identity
     def schedule_updates(self,now):
         """Saved-only eligibility; one healthy batch plus verified recovery jobs.
 
@@ -194,9 +307,13 @@ class Store:
             def persist():
                 db.execute("INSERT OR REPLACE INTO runtime VALUES('refresh_cadence',?)",(encode(cadence),))
             if not saved: persist()
+            quarantines=self.quarantine_registry(db)
+            if quarantines is None: return 'blocked'
+            quarantine_ids=set(quarantines)
+            quarantine_contracts={b['job']['contract'] for b in quarantines.values()}
             # Every approved contract needs its initial query exhausted, not just
             # a page, a published first contract, or a misleading chain-complete flag.
-            if db.execute("SELECT 1 FROM contracts c WHERE NOT EXISTS (SELECT 1 FROM jobs j WHERE j.contract=c.contract AND j.mode='backfill' AND j.state='exhausted') LIMIT 1").fetchone(): return
+            if db.execute("SELECT 1 FROM contracts c WHERE NOT EXISTS (SELECT 1 FROM jobs j WHERE j.contract=c.contract AND j.mode='backfill' AND j.state IN ('exhausted','quarantined')) LIMIT 1").fetchone(): return
             cadence.setdefault('observed',cadence['completed'])
             cadence.setdefault('recoveries',[])
             # Durable identities authorize this narrow lane, never mode alone.
@@ -223,11 +340,12 @@ class Store:
                 members=[db.execute('SELECT * FROM jobs WHERE id=?',(identity,)).fetchone() for identity in pending['jobs']]
                 if any(j is None for j in members): return 'blocked'
                 for job in members:
+                    if job['id'] in quarantine_ids: continue
                     if job['state'] not in ('queued','running','deferred','exhausted'): return 'blocked'
                     # Validate every member before allowing any nonterminal return:
                     # list order must not hide a blocked or unknown terminal result.
                     if job['state']=='exhausted' and job['published'] is None and job['error']!='Invalid per-token balance: supply withheld; provider coverage incomplete': return 'blocked'
-                if any(job['state']!='exhausted' for job in members): return
+                if any(job['state']!='exhausted' and job['id'] not in quarantine_ids for job in members): return
                 cadence['observed']=pending['slot']
                 cadence['observed_excluded_contracts']=sorted(set(pending.get('excluded_contracts',[])+[j['contract'] for j in members if j['published'] is None]))
                 unresolved=db.execute("SELECT 1 FROM jobs j WHERE j.id=(SELECT MAX(x.id) FROM jobs x WHERE x.contract=j.contract) AND j.published IS NULL LIMIT 1").fetchone()
@@ -243,6 +361,8 @@ class Store:
             identities=[]; excluded=[]
             for row in rows:
                 j=db.execute('SELECT * FROM jobs WHERE id=?',(row['latest'],)).fetchone()
+                if j['contract'] in quarantine_contracts:
+                    excluded.append(j['contract']);continue
                 if j['id'] in recovery_ids and j['state']!='exhausted':
                     excluded.append(j['contract']);continue
                 last_full=db.execute("SELECT MAX(upper_at) FROM jobs WHERE contract=? AND mode IN ('backfill','reconcile','recovery') AND state='exhausted'",(j['contract'],)).fetchone()[0]
@@ -280,7 +400,9 @@ class Store:
     def report(self,sort='supply'):
         if sort not in ('supply','oldest','newest'): raise ValueError('Invalid sort')
         with self.connect(readonly=True) as db:
-            contracts=[]
+            contracts=[];incidents=[]
+            registry=self.quarantine_registry(db)
+            quarantined={b['job']['contract']:(digest(b),b) for b in (registry or {}).values()}
             for c in db.execute('SELECT * FROM contracts'):
                 j=dict(db.execute('SELECT * FROM jobs WHERE contract=? ORDER BY id DESC LIMIT 1',(c['contract'],)).fetchone())
                 g=db.execute('SELECT * FROM generations WHERE contract=? ORDER BY id DESC LIMIT 1',(c['contract'],)).fetchone()
@@ -304,6 +426,18 @@ class Store:
                 last_invalid=db.execute("SELECT id,error FROM jobs WHERE contract=? AND state='exhausted' AND published IS NULL AND error=? ORDER BY id DESC LIMIT 1",(c['contract'],'Invalid per-token balance: supply withheld; provider coverage incomplete')).fetchone() if invalid else None
                 recovery=db.execute("SELECT MAX(upper_at) FROM jobs WHERE contract=? AND mode IN ('reconcile','recovery') AND state='exhausted'",(c['contract'],)).fetchone()[0] if invalid else None
                 validation={'validation_state':'withheld' if invalid else ('published' if g and j['published'] else 'pending'),'validation_error':last_invalid['error'] if last_invalid else None,'unresolved_job':last_invalid['id'] if last_invalid else None,'recovery_not_before':utc(datetime.fromisoformat(stamp(recovery)).timestamp()+30*86400) if recovery else None,'source_freshness':freshness}
+                incident=None
+                if c['contract'] in quarantined:
+                    identity,body=quarantined[c['contract']]
+                    incident={'incident':identity,'job':body['job']['id'],'kind':body['stage']}
+                elif last_invalid:
+                    incident={'incident':'balance:'+str(last_invalid['id']),'job':last_invalid['id'],'kind':'invalid-token-balance'}
+                elif pending_job==j['id'] and j['state']=='blocked':
+                    incident={'incident':'unknown:'+str(j['id']),'job':j['id'],'kind':'global-required-review'}
+                if incident:
+                    incident.update(contract=c['contract'],name=c['name'],status='unresolved/operator-review')
+                    incidents.append(incident)
+                validation['incident_status']='unresolved/operator-review' if incident else None
                 contracts.append({**validation,**{k:c[k] for k in ('contract','name','standard')},**result,'progress':progress,'coverage':QUALIFIER if g else 'partial / unknown; blockchain incomplete','state':j['state'],'pages':j['pages'],'error':j['error'],'next_retry':utc(j['due']) if j['due'] else None,'mode':j['mode'],'as_of':g['created_at'] if g else None,'upper_at':j['upper_at']})
             rarity_metadata=None
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='rarity_work'").fetchone():
@@ -313,10 +447,12 @@ class Store:
                 for c in contracts:c['rarity_metadata']=metadata_contracts.get(c['contract'])
             runtime=dict(db.execute('SELECT name,value FROM runtime'))
             counts={t:db.execute('SELECT COUNT(*) FROM '+t).fetchone()[0] for t in ('receipts','revisions','events','generations')}
+            counts['unresolved_incidents']=len(incidents)
+            counts['incident_registry_valid']=registry is not None
             counts['accepted_pages']=db.execute('SELECT COUNT(*) FROM receipts WHERE accepted=1').fetchone()[0]
             counts['query_exhausted_contracts']=db.execute('SELECT COUNT(DISTINCT contract) FROM generations').fetchone()[0]
         def key(c):
             if sort=='supply': return (c['exists'] is None,-(c['exists'] or 0),c['name'],c['contract'])
             d=datetime.fromisoformat(c['first_mint']).timestamp() if c['first_mint'] else 0
             return (c['first_mint'] is None,d if sort=='oldest' else -d,c['name'],c['contract'])
-        return {'rarity_metadata':rarity_metadata,'contracts':sorted(contracts,key=key),'counts':counts,'runtime':runtime,'llm_tokens':0,'notifications':0,'blockchain_complete':False,'source':'Rarible indexed MINT/BURN; no configured Polygon RPC','generated_at':utc(time.time())}
+        return {'incidents':incidents,'rarity_metadata':rarity_metadata,'contracts':sorted(contracts,key=key),'counts':counts,'runtime':runtime,'llm_tokens':0,'notifications':0,'blockchain_complete':False,'source':'Rarible indexed MINT/BURN; no configured Polygon RPC','generated_at':utc(time.time())}
