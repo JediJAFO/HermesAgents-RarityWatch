@@ -64,6 +64,8 @@ CREATE TABLE IF NOT EXISTS generations(id INTEGER PRIMARY KEY,job INTEGER NOT NU
 CREATE TABLE IF NOT EXISTS runtime(name TEXT PRIMARY KEY,value TEXT NOT NULL);
 '''
 
+from mtd_release_curation import project_supply
+
 class Store:
     def __init__(self,path=DATABASE): self.path=pathlib.Path(path)
     @contextmanager
@@ -154,10 +156,14 @@ class Store:
                 found[j['id']]=b
             if {x[0] for x in db.execute("SELECT id FROM jobs WHERE state='quarantined'")}!=set(found): return None
         except (KeyError,ValueError,TypeError,AttributeError): return None
-        return found
+        # Validate ALL immutable historical jobs before excluding only unresolved ones.
+        from mtd_supply_recovery import validated_resolutions
+        resolved=validated_resolutions(self,db,found)
+        if resolved is None: return None
+        return {j:b for j,b in found.items() if j not in resolved}
     def next_job(self,now):
         with self.connect(readonly=True) as db:
-            r=db.execute("SELECT j.*,c.standard FROM jobs j JOIN contracts c USING(contract) WHERE state IN ('queued','running','deferred') AND due<=? ORDER BY serviced,id LIMIT 1",(now,)).fetchone()
+            r=db.execute("SELECT j.*,c.standard FROM jobs j JOIN contracts c USING(contract) WHERE state IN ('queued','running','deferred') AND mode!='fresh_recovery' AND due<=? ORDER BY serviced,id LIMIT 1",(now,)).fetchone()
             return dict(r) if r else None
     def request(self,job):
         f={'blockchains':['POLYGON'],'collections':[job['contract']],'types':['MINT','BURN'],'to':job['upper_at']}
@@ -180,7 +186,7 @@ class Store:
             for b in buckets.values(): b['exists']=None
         minted=sum(b['minted'] for b in buckets.values());burned=sum(b['burned'] for b in buckets.values())
         return {'minted':minted if buckets else None,'burned':burned if buckets else None,'exists':None if invalid or not buckets else minted-burned,'rarities':sorted(buckets.values(),key=lambda b:b['rarity']),'first_mint':first,'distinct_token_ids':len(tokens),'balance_valid':not invalid,'blockchain_complete':False}
-    def commit_page(self,job,response,now=None):
+    def commit_page(self,job,response,now=None,*,expected_pending=None):
         now=time.time() if now is None else now
         # Archive transport result BEFORE interpretation; rejected raw pages are
         # retained without advancing checkpoints or replacing completed results.
@@ -189,12 +195,22 @@ class Store:
         try:
             with self.connect() as db:
                 db.execute('BEGIN IMMEDIATE')
+                if expected_pending is not None:
+                    pending=db.execute("SELECT value FROM runtime WHERE name='pending_request'").fetchone()
+                    if not pending or pending[0]!=expected_pending: raise ValueError('Exact pending intent changed')
+                    current=db.execute('SELECT * FROM jobs WHERE id=?',(job['id'],)).fetchone()
+                    if not current or dict(current)!={k:v for k,v in job.items() if k!='standard'}: raise ValueError('Exact fresh job checkpoint changed')
                 self._apply_page(db,job,response,receipt,now)
         except Exception:
             with self.connect() as db: db.execute('UPDATE receipts SET error=? WHERE id=?',('Rejected page; inspect private evidence',receipt))
             raise
         return receipt
+    def exclude_noncanonical_mint(self,db,manifest):
+        """Protected operator-only correction; provider raw evidence stays immutable."""
+        from mtd_supply_canonicality import apply_exclusion
+        return apply_exclusion(db,manifest)
     def _apply_page(self,db,job,response,receipt,now):
+        from mtd_supply_canonicality import effective_reversion
         if not isinstance(response,dict) or not isinstance(response.get('activities'),list): raise ValueError('Malformed page')
         cursor=response.get('cursor')
         if cursor is not None and (not isinstance(cursor,str) or not cursor or cursor==job['cursor'] or len(cursor)>8192): raise ValueError('Invalid/repeated cursor')
@@ -206,6 +222,9 @@ class Store:
             h=digest(raw)
             db.execute('INSERT OR IGNORE INTO revisions VALUES(?,?,?)',(n['id'],h,encode(raw)))
             db.execute('INSERT OR IGNORE INTO observations VALUES(?,?,?)',(receipt,n['id'],h))
+            # Effective eligibility can include an independently proved chain exclusion.
+            # The raw provider revision above is never rewritten.
+            n['reverted']=effective_reversion(db,raw,n)
             order=(n['updated'],n['version'])
             prior=db.execute('SELECT e.* FROM events e JOIN event_aliases a ON a.event=e.event WHERE a.provider_id=?',(n['id'],)).fetchone()
             if prior and prior['event']!=n['event']:
@@ -309,8 +328,11 @@ class Store:
             if not saved: persist()
             quarantines=self.quarantine_registry(db)
             if quarantines is None: return 'blocked'
-            quarantine_ids=set(quarantines)
+            quarantine_ids={r[0] for r in db.execute("SELECT id FROM jobs WHERE state='quarantined'")}
             quarantine_contracts={b['job']['contract'] for b in quarantines.values()}
+            from mtd_supply_recovery import fresh_registry
+            fresh_ids=fresh_registry(self,db)
+            if fresh_ids is None: return 'blocked'
             # Every approved contract needs its initial query exhausted, not just
             # a page, a published first contract, or a misleading chain-complete flag.
             if db.execute("SELECT 1 FROM contracts c WHERE NOT EXISTS (SELECT 1 FROM jobs j WHERE j.contract=c.contract AND j.mode='backfill' AND j.state IN ('exhausted','quarantined')) LIMIT 1").fetchone(): return
@@ -355,7 +377,7 @@ class Store:
             if slot<=cadence['activated'] or (cadence['observed'] is not None and slot<=cadence['observed']): return
             # Preserve any pre-policy in-flight/blocked job; never reset its guards.
             active=db.execute("SELECT id FROM jobs WHERE state IN ('queued','running','deferred','blocked')").fetchall()
-            if any(j['id'] not in recovery_ids for j in active): return
+            if any(j['id'] not in recovery_ids and j['id'] not in fresh_ids for j in active): return
             rows=db.execute("SELECT c.contract,MAX(j.id) latest FROM contracts c JOIN jobs j USING(contract) GROUP BY c.contract").fetchall()
             if not rows: return
             identities=[]; excluded=[]
@@ -438,7 +460,12 @@ class Store:
                     incident.update(contract=c['contract'],name=c['name'],status='unresolved/operator-review')
                     incidents.append(incident)
                 validation['incident_status']='unresolved/operator-review' if incident else None
-                contracts.append({**validation,**{k:c[k] for k in ('contract','name','standard')},**result,'progress':progress,'coverage':QUALIFIER if g else 'partial / unknown; blockchain incomplete','state':j['state'],'pages':j['pages'],'error':j['error'],'next_retry':utc(j['due']) if j['due'] else None,'mode':j['mode'],'as_of':g['created_at'] if g else None,'upper_at':j['upper_at']})
+                if not incident and registry is not None:
+                    resolution=db.execute("SELECT value FROM runtime WHERE name LIKE 'supply_resolution:%' AND json_extract(value,'$.job') IN (SELECT id FROM jobs WHERE contract=?) LIMIT 1",(c['contract'],)).fetchone()
+                    if resolution:
+                        from mtd_supply_recovery import STATUS
+                        validation['incident_status']=STATUS
+                contracts.append({**validation,**{k:c[k] for k in ('contract','name','standard')},**project_supply(c['contract'],result),'progress':project_supply(c['contract'],progress),'coverage':QUALIFIER if g else 'partial / unknown; blockchain incomplete','state':j['state'],'pages':j['pages'],'error':j['error'],'next_retry':utc(j['due']) if j['due'] else None,'mode':j['mode'],'as_of':g['created_at'] if g else None,'upper_at':j['upper_at']})
             rarity_metadata=None
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='rarity_work'").fetchone():
                 from mtd_rarity_queue import progress as metadata_progress

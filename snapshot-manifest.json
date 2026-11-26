@@ -38,7 +38,7 @@
     "scripts/mtd_shared_listing_schedule.py": "9d6de0c815384d87dad62561b00daa95084eee80b085538508c10b8f0d9b4fad",
     "scripts/mtd_shared_listing_source.py": "962eb368771b7cc4f02fd913f7364d762197d2b4f3e904fbeb63d6a5bf09d163",
     "scripts/mtd_shared_rarity_client.py": "329133a837a3ed49febe90a4e53d32d83898c16dacab301523488619b40c40a4",
-    "scripts/mtd_supply.py": "95f43b0e9114711dbf0cf4c57e59cf1986c81f6bcda40a7ba9b047f1b4c651d0",
+    "scripts/mtd_supply.py": "9d556313f9f1828a9ba821b167dd03a2d29a5239b54924f72398e14f8e42b569",
     "scripts/mtd_under100_sniper.py": "9e6ea491a261fad62cbdd175b8981228f3e3d95442204b6132f200cb30277910",
     "scripts/mtd_wallet_graph.py": "78fbcec3d9e2a83328c3f80a58e55c8bd2cbf935a8f358d8531fa362f16138fa",
     "scripts/mtd_wallet_graph_ui.py": "e82771d6468d7e7ee1befe71e38a5477f1627bbb0b03ce9fff914a3e054ca708",
